@@ -36,16 +36,17 @@ conda install openblas-devel -c anaconda
 git clone https://github.com/NVIDIA/MinkowskiEngine.git
 cd MinkowskiEngine
 ```
-This don't work anymore:
+
+The original installation command won't work anymore:
 ```
 python setup.py install --blas_include_dirs=${CONDA_PREFIX}/include --blas=openblas
 ```
 
-Try this instead:
+To fix the issue, try this instead:
 
 1. Find your conda environment include directory which is ${CONDA_PREFIX}/include
 
-2. Goto setup.py. add
+2. Goto setup.py and add two lines to hardcode the BLAS settings:
 
 ```
  BLAS, argv = _argparse("--blas", argv, False)
@@ -54,7 +55,7 @@ Try this instead:
 +BLAS_INCLUDE_DIRS = ["YOUR_CONDA_ENV_INCLUDE"]
  BLAS_LIBRARY_DIRS, argv = _argparse("--blas_library_dirs", argv, False, is_list=True)
 ```
-3. run
+3. Then run pip install:
 ```
 pip install .
 ```
