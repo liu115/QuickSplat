@@ -1,0 +1,8 @@
+opencv-python
+Pillow
+PyYAML
+yacs
+tqdm
+plyfile
+scikit-learn
+tensorboard
