@@ -119,7 +119,6 @@ _C.MODEL.OPT.add_step_every = 1000
 _C.MODEL.OPT.inner_batch_size = 8
 _C.MODEL.OPT.inner_downsample = 2
 _C.MODEL.OPT.max_grad = 1.0
-_C.MODEL.OPT.g3r_reg_mult = 0.0
 _C.MODEL.OPT.mask_gradients = False
 _C.MODEL.OPT.ssim_mult = 0.2
 _C.MODEL.OPT.lpips_mult = 0.1
