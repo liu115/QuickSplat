@@ -7,9 +7,9 @@ import torch
 from torch.utils.data import Dataset
 import open3d as o3d
 
-from data.scannetpp import ScannetppDataset
-from models.rasterizer import Camera, ScaffoldRasterizer
-from models.rasterizer_2d import Scaffold2DGSRasterizer
+from dataset.scannetpp import ScannetppDataset
+from modules.rasterizer_3d import Camera, ScaffoldRasterizer
+from modules.rasterizer_2d import Scaffold2DGSRasterizer
 from utils.utils import move_to_device
 
 

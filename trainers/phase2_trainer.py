@@ -1,8 +1,6 @@
 from typing import Any, Union, Optional, List, Tuple, Dict, Literal
 from pathlib import Path
-import functools
-import time
-import random
+import json
 
 import numpy as np
 import torch
@@ -25,6 +23,7 @@ from modules.rasterizer_2d import Scaffold2DGSRasterizer
 
 from utils.pose import apply_transform, apply_rotation
 from utils.optimizer import Optimizer
+from utils.rich_utils import CONSOLE
 from utils.sparse import xyz_list_to_bxyz, chamfer_dist, chamfer_dist_with_crop
 from utils.fusion import MeshExtractor
 
@@ -63,14 +62,6 @@ class Phase2Trainer(QuickSplatTrainer):
             raise ValueError(f"Unknown gaussian type {self.config.MODEL.gaussian_type}")
 
         if self.config.MODEL.input_type == "colmap+completion":
-            # Load the initializer checkpoint
-            ckpt_path = Path(self.config.TRAIN.ckpt_path)
-            assert ckpt_path.exists(), f"Checkpoint path {ckpt_path} does not exist"
-            # If the checkpoint is a directory, load the latest checkpoint
-            if ckpt_path.is_dir():
-                ckpt_path = sorted(ckpt_path.glob("*.ckpt"))[-1]
-            ckpt = torch.load(ckpt_path, map_location="cpu")
-
             if self.config.MODEL.gaussian_type == "3d":
                 out_channels = 3 + 3 + 4    # scale (3) + rgb (3) + rotation (4)
             else:
@@ -84,8 +75,15 @@ class Phase2Trainer(QuickSplatTrainer):
                 num_dense_blocks=self.config.MODEL.INIT.num_dense_blocks,
             ).to(self.device).eval()
 
+            # Load the initializer checkpoint
+            ckpt_path = Path(self.config.TRAIN.ckpt_path)
+            assert ckpt_path.exists(), f"Checkpoint path {ckpt_path} does not exist"
+            # If the checkpoint is a directory, load the latest checkpoint
+            if ckpt_path.is_dir():
+                ckpt_path = sorted(ckpt_path.glob("*.ckpt"))[-1]
+            ckpt = torch.load(ckpt_path, map_location="cpu")
             self.initializer.load_state_dict(ckpt["model"])
-            print(f"Loaded SGNN checkpoint from {ckpt_path}")
+            CONSOLE.print(f"Loaded SGNN checkpoint from {ckpt_path}")
 
     def get_model(self) -> nn.Module:
         self.setup_decoders()
@@ -128,7 +126,7 @@ class Phase2Trainer(QuickSplatTrainer):
             sparse_tensor_input,
             gt_coords=bxyz_input,       # Doesn't matter for evaluation
             # max_samples_second_last=self.config.DATASET.max_num_points * self.config.TRAIN.batch_size // 8,
-            verbose=self.config.debug,
+            # verbose=self.config.debug,
         )
         output_sparse = initializer_outputs["out"]
         occ_logits_last = initializer_outputs["last_prob"]
@@ -262,47 +260,49 @@ class Phase2Trainer(QuickSplatTrainer):
     #         test_mode=test_mode,
     #     )
 
-    def init_scaffold_train(
-        self,
-        xyz: torch.Tensor,
-        rgb: torch.Tensor,
-        xyz_voxel: torch.Tensor,
-        xyz_offset: torch.Tensor,
-        transform: torch.Tensor,    # From voxel to world
-        bbox: torch.Tensor,
-        bbox_voxel: Optional[torch.Tensor] = None,
-        normal: Optional[torch.Tensor] = None,
-        test_mode: bool = False,
-    ) -> ScaffoldGSFull:
-        seed = None
-        if self.config.MODEL.SCAFFOLD.fix_init or test_mode:
-            seed = self.config.MODEL.SCAFFOLD.seed
+    # def init_scaffold_train(
+    #     self,
+    #     xyz: torch.Tensor,
+    #     rgb: torch.Tensor,
+    #     xyz_voxel: torch.Tensor,
+    #     xyz_offset: torch.Tensor,
+    #     transform: torch.Tensor,    # From voxel to world
+    #     bbox: torch.Tensor,
+    #     bbox_voxel: Optional[torch.Tensor] = None,
+    #     normal: Optional[torch.Tensor] = None,
+    #     test_mode: bool = False,
+    # ) -> ScaffoldGSFull:
+    #     seed = None
+    #     if self.config.MODEL.SCAFFOLD.fix_init or test_mode:
+    #         seed = self.config.MODEL.SCAFFOLD.seed
 
-        if self.config.MODEL.input_type == "colmap+completion":
-            # Use the SGNN to densify the points
-            xyz_voxel, xyz, rgb, normal = self._densify(xyz_voxel, xyz, rgb, transform, bbox, bbox_voxel=bbox_voxel, test_mode=test_mode)
-            # After completion, the offsets are lost
-            xyz_offset = torch.zeros_like(xyz)
-            if "normal" not in self.config.MODEL.init_type:
-                normal = None
+    #     if self.config.MODEL.input_type == "colmap+completion":
+    #         # Use the initializer to densify the points
+    #         xyz_voxel, xyz, rgb, normal = self._densify(xyz_voxel, xyz, rgb, transform, bbox, bbox_voxel=bbox_voxel, test_mode=test_mode)
+    #         # After completion, the offsets are lost
+    #         xyz_offset = torch.zeros_like(xyz)
+    #         # TODO: Check this
+    #         if "normal" not in self.config.MODEL.init_type:
+    #             normal = None
 
-        return ScaffoldGSFull.create_from_voxels2(
-            self.config.MODEL,
-            hidden_dim=self.config.MODEL.SCAFFOLD.hidden_dim,
-            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-            xyz=xyz,
-            rgb=rgb,
-            xyz_voxel=xyz_voxel,
-            xyz_offset=xyz_offset,
-            transform=transform,
-            bbox=bbox,
-            zero_latent=self.config.MODEL.SCAFFOLD.zero_latent,
-            spatial_lr_scale=1.0,
-            normal=normal,
-            seed=seed,
-            unit_scale=self.config.MODEL.SCAFFOLD.unit_scale,
-            unit_scale_multiplier=self.config.MODEL.SCAFFOLD.unit_scale_multiplier,
-        )
+    #     return ScaffoldGSFull.create_from_voxels2(
+    #         self.config.MODEL,
+    #         hidden_dim=self.config.MODEL.SCAFFOLD.hidden_dim,
+    #         voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #         xyz=xyz,
+    #         rgb=rgb,
+    #         xyz_voxel=xyz_voxel,
+    #         xyz_offset=xyz_offset,
+    #         transform=transform,
+    #         bbox=bbox,
+    #         zero_latent=self.config.MODEL.SCAFFOLD.zero_latent,
+    #         spatial_lr_scale=1.0,
+    #         normal=normal,
+    #         seed=seed,
+    #         unit_scale=self.config.MODEL.SCAFFOLD.unit_scale,
+    #         unit_scale_multiplier=self.config.MODEL.SCAFFOLD.unit_scale_multiplier,
+    #         is_2dgs=self.config.MODEL.gaussian_type == "2d",
+    #     )
 
     @torch.no_grad()
     def init_scaffold_test(self, scene_id: str, test_mode: bool = False) -> ScaffoldGSFull:
@@ -1004,18 +1004,6 @@ class Phase2Trainer(QuickSplatTrainer):
         xyz_list_new, latent_list_new = output_sparse.decomposed_coordinates_and_features
         grad_list_new = [torch.zeros_like(x) for x in latent_list_new]
 
-        if self.config.MODEL.model_type == "with_memory":
-            remap_mapping = []
-            base = 0
-            for i in range(len(self.scaffolds)):
-                remap_mapping.append(
-                    torch.arange(base, base + self.scaffolds[i].xyz_voxel.shape[0], device=xyz_list_new[i].device)
-                )
-                base += self.scaffolds[i].xyz_voxel.shape[0] + xyz_list_new[i].shape[0]
-            remap_mapping = torch.cat(remap_mapping, dim=0)
-        else:
-            remap_mapping = None
-
         # Concatenate the new points to the existing scaffold
         for i in range(len(self.scaffolds)):
             xyz_list_new[i] = torch.cat([self.scaffolds[i].xyz_voxel, xyz_list_new[i]], dim=0)
@@ -1030,12 +1018,18 @@ class Phase2Trainer(QuickSplatTrainer):
         params_cat = {k: torch.cat([p[k] for p in params_new], dim=0) for k in params_new[0].keys()}
         grads_cat = {k: torch.cat([g[k] for g in grads_new], dim=0) for k in grads_new[0].keys()}
 
+        if self.config.MODEL.DENSIFIER.recompute_grad:
+            for i in range(len(self.scaffolds)):
+                self.scaffolds[i].set_raw_params_and_xyz(params_new[i], xyz_list_new[i])
+                grad_dict = self.get_params_grad(self.scaffolds[i], params_new[i], self.current_train_scene_ids[i])
+                grad_list_new[i] = grad_dict["grad_input"]
+
         outputs = self._model(
             bxyz,
             params_cat,
             grads_cat,
             timestamp=timestamp,
-            remap_mapping=remap_mapping,
+            remap_mapping=None,
         )
 
         # print(f"After points: {bxyz.shape} inner_step={inner_step_idx}")
@@ -1265,3 +1259,189 @@ class Phase2Trainer(QuickSplatTrainer):
             metrics_dict,
             other_stuff,
         )
+
+    def validate(self, step_idx: int, save_path: Optional[str] = None) -> Dict[str, float]:
+        self.model.eval()
+        self.densifier.eval()
+        self.scaffold_decoder.eval()
+
+        metrics_list_init = []
+        metrics_list_final = []
+
+        for scene_idx, scene_id in enumerate(tqdm(self.val_dataset.scene_list, desc="Validation")):
+            scaffold = self.init_scaffold_test(scene_id, test_mode=True)
+            xyz_voxel_init = scaffold.xyz_voxel.clone()
+
+            init_metrics = self.evaluate_gs(
+                scaffold=scaffold,
+                scene_id=scene_id,
+                save_path=save_path,
+                save_file_suffix="init",
+                use_identity=True,
+            )
+            metrics_list_init.extend(init_metrics)
+
+            xyz_gt, rgb_gt, xyz_voxel_gt, *_ = self.val_dataset.load_voxelized_mesh_points(
+                scene_id,
+                voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+                bbox_min=scaffold.bbox[0].cpu().numpy(),
+                bbox_max=scaffold.bbox[1].cpu().numpy(),
+                load_normal=False,
+            )
+            xyz_voxel_gt = torch.from_numpy(xyz_voxel_gt).int().to(self.device)
+            # bxyz_gt, _ = xyz_list_to_bxyz([xyz_voxel_gt])
+
+            chamfer_init = chamfer_dist(scaffold.xyz_voxel, xyz_voxel_gt, norm=1).item()
+            chamfer_gt_to_pred_init = chamfer_dist(xyz_voxel_gt, scaffold.xyz_voxel, norm=1, single_directional=True).item()
+
+            # Run the quicksplat optimization
+            all_new_xyz_voxels = []
+            num_new_points = 0
+            for inner_step_idx in range(self.num_inner_steps):
+                timestamp = self._get_timestamp(inner_step_idx, self.num_inner_steps)
+                params = scaffold.get_raw_params()
+
+                grad_dict = self.get_params_grad(scaffold, params, scene_id, fixed=True)
+                grads = grad_dict["grad_input"]
+                grad_2d = grad_dict["grad_2d"]
+
+                # We don't update the scaffold parameters
+                params = {k: v.detach() for k, v in params.items()}
+
+                if self.config.MODEL.DENSIFIER.train_densify_only_steps > 0 and step_idx < self.config.MODEL.DENSIFIER.train_densify_only_steps:
+                    # Don't use the params and grads when training densifier only
+                    params = {k: torch.zeros_like(v) for k, v in params.items()}
+                    grads = {k: torch.zeros_like(v) for k, v in grads.items()}
+
+                bxyz, _ = xyz_list_to_bxyz([scaffold.xyz_voxel])
+
+                if self.config.MODEL.DENSIFIER.sample_num_per_step_eval > 0:
+                    sample_n_last = self.config.MODEL.DENSIFIER.sample_num_per_step_eval
+                    sample_n_last //= (2 ** inner_step_idx)
+                    samples_second_last = self.config.MODEL.DENSIFIER.sample_num_per_step_eval // 2
+                elif self.config.MODEL.DENSIFIER.sample_num_per_step > 0:
+                    sample_n_last = self.config.MODEL.DENSIFIER.sample_num_per_step
+                    sample_n_last //= (2 ** inner_step_idx)
+                    samples_second_last = self.config.MODEL.DENSIFIER.sample_num_per_step // 2
+                else:
+                    sample_n_last = None
+                    samples_second_last = None
+
+                # print(f"Original points: {bxyz.shape} inner_step={inner_step_idx}")
+                # TODO: Add more points than training for evaluation
+                with torch.no_grad():
+                    dense_outputs = self.densifier(
+                        params,
+                        grads,
+                        bxyz,
+                        bxyz,
+                        timestamp=timestamp,
+                        sample_n_last=sample_n_last,
+                        # temperature is not used in eval if eval_randomness = False
+                        # else use sample_temperature_min
+                        sample_temperature=self.config.MODEL.DENSIFIER.sample_temperature_min,
+                        # max_gt_samples_training=None,       # gt is not used during eval
+                        # TODO: Try this?
+                        max_gt_samples_training=sample_n_last,
+                        # max_gt_samples_training=self.config.DATASET.eval_max_num_points,
+                        # TODO: Might need to use this to save memory
+                        max_samples_second_last=samples_second_last,
+                    )
+
+                    output_sparse = dense_outputs["out"]
+                    ignore_final = dense_outputs["ignore_final"]
+                    # Select only those that exists
+                    before_prune = output_sparse
+                    output_sparse = self.prune(output_sparse, ~ignore_final)
+                    num_new_points += output_sparse.shape[0]
+                    if self.config.debug:
+                        print(f"Generating new points: {output_sparse.shape[0]} / {before_prune.shape[0]}")
+
+                    xyz_new, latent_new = output_sparse.decomposed_coordinates_and_features
+                    xyz_new = xyz_new[0]
+                    all_new_xyz_voxels.append(xyz_new)
+                    latent_new = latent_new[0]
+                    grad_new = torch.zeros_like(latent_new)
+
+                    xyz_new = torch.cat([scaffold.xyz_voxel, xyz_new], dim=0)
+                    latent_new = torch.cat([params["latent"], latent_new], dim=0)
+                    grad_new = torch.cat([grads["latent"], grad_new], dim=0)
+
+                    if self.config.MODEL.DENSIFIER.recompute_grad:
+                        scaffold.set_raw_params_and_xyz({"latent": latent_new}, xyz_new)
+                        grad_dict = self.get_params_grad(scaffold, {"latent": latent_new}, scene_id, fixed=True)
+                        grad_new = grad_dict["grad_input"]
+                    else:
+                        # The gradients for the new Gaussians are zero
+                        pass
+
+                    bxyz, _ = xyz_list_to_bxyz([xyz_new])
+
+                    outputs = self._model(
+                        bxyz,
+                        {"latent": latent_new},
+                        {"latent": grad_new},
+                        timestamp=timestamp,
+                        remap_mapping=None,
+                    )
+                    # print(f"After points: {bxyz.shape} inner_step={inner_step_idx}")
+
+                    latent_delta = (
+                        outputs["latent"]
+                        * self.config.MODEL.OPT.output_scale
+                        * max(self.config.MODEL.OPT.scale_gamma ** inner_step_idx, self.config.MODEL.OPT.min_scale)
+                    )
+
+                    latent_new = latent_new + latent_delta
+                    scaffold.set_raw_params_and_xyz({"latent": latent_new}, xyz_new)
+                # print(f"after inner={inner_step_idx} outputs: {outputs['latent'].shape}, params: {scaffold.get_raw_params()['latent'].shape}")
+
+            chamfer_full = chamfer_dist(scaffold.xyz_voxel, xyz_voxel_gt, norm=1).item()
+            chamfer_pred_to_gt = chamfer_dist(scaffold.xyz_voxel, xyz_voxel_gt, norm=1, single_directional=True).item()
+            chamfer_gt_to_pred = chamfer_dist(xyz_voxel_gt, scaffold.xyz_voxel, norm=1, single_directional=True).item()
+            # if scene_idx < 10 and save_path is not None:
+            #     save_path = Path(save_path)
+            #     save_path.mkdir(parents=True, exist_ok=True)
+
+            #     if scene_idx == 0:
+            #         print(f"Saving to {save_path}")
+
+            #     xyz_voxel_init = xyz_voxel_init.cpu().numpy()
+            #     save_ply(save_path / f"{scene_id}_init.ply", xyz_voxel_init, np.zeros_like(xyz_voxel_init))
+            #     xyz_voxel_gt = xyz_voxel_gt.cpu().numpy()
+            #     save_ply(save_path / f"{scene_id}_gt.ply", xyz_voxel_gt, rgb_gt)
+            #     xyz_voxel_pred = scaffold.xyz_voxel.cpu().numpy()
+            #     save_ply(save_path / f"{scene_id}_pred.ply", xyz_voxel_pred, np.zeros_like(xyz_voxel_pred))
+
+            #     all_new_xyz_voxels = torch.cat(all_new_xyz_voxels, dim=0).cpu().numpy()
+            #     save_ply(save_path / f"{scene_id}_all_new.ply", all_new_xyz_voxels, np.zeros_like(all_new_xyz_voxels))
+
+            final_metrics = self.evaluate_gs(
+                scaffold=scaffold,
+                scene_id=scene_id,
+                save_path=save_path,
+                save_file_suffix="final",
+                use_identity=False,
+            )
+            for x in final_metrics:
+                x["chamfer_init"] = chamfer_init
+                x["chamfer_gt_to_pred_init"] = chamfer_gt_to_pred_init
+                x["chamfer_full"] = chamfer_full
+                x["chamfer_pred_to_gt"] = chamfer_pred_to_gt
+                x["chamfer_gt_to_pred"] = chamfer_gt_to_pred
+                x["num_new_points"] = num_new_points
+
+            metrics_list_final.extend(final_metrics)
+            torch.cuda.empty_cache()
+
+        final_metrics = {}
+        for k, v in metrics_list_final[0].items():
+            final_metrics[k] = np.mean([m[k] for m in metrics_list_final])
+
+        for k in metrics_list_init[0].keys():
+            final_metrics[f"{k}_init"] = np.mean([m[k] for m in metrics_list_init])
+        self.model.train()
+        self.densifier.train()
+        self.scaffold_decoder.train()
+        print(json.dumps(final_metrics, indent=4))
+        return final_metrics

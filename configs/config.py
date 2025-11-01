@@ -100,12 +100,11 @@ _C.MODEL.SCAFFOLD.skip_connect = False
 # Seed to initialize the latent vector
 _C.MODEL.SCAFFOLD.seed = 5566
 _C.MODEL.SCAFFOLD.fix_init = True
-_C.MODEL.SCAFFOLD.exp_scale = True
 _C.MODEL.SCAFFOLD.max_scale = 10.0
 _C.MODEL.SCAFFOLD.quat_rotation = False
 _C.MODEL.SCAFFOLD.zero_latent = True
 _C.MODEL.SCAFFOLD.normal_zero_init = False
-# sigmoid, softplus, abs
+# sigmoid, softplus, abs, exp
 _C.MODEL.SCAFFOLD.scale_activation = "sigmoid"
 _C.MODEL.SCAFFOLD.modify_xyz_offsets = True
 _C.MODEL.SCAFFOLD.unit_scale = False
@@ -132,7 +131,7 @@ _C.MODEL.OPT.scale_gamma = 0.7
 _C.MODEL.OPT.min_scale = 0.05
 _C.MODEL.OPT.timestamp_norm = False
 _C.MODEL.OPT.timestamp_random = False
-_C.MODEL.OPT.output_norm = False
+_C.MODEL.OPT.output_norm = True
 _C.MODEL.OPT.decoder_update_last_only = False
 _C.MODEL.OPT.grad_residual = False
 # 16unetA, 16unetC

@@ -109,7 +109,6 @@ class Phase1Trainer(QuickSplatTrainer):
                 output_sparse = initializer_outputs["out"]
                 xyz_voxel_init.append(output_sparse.C[:, 1:].clone())
 
-            if self.config.MODEL.input_type == "colmap+completion":
                 valid_mask = (xyz_voxel_init[i] >= bbox_voxel_list[i][0, :]).all(dim=1) & (xyz_voxel_init[i] <= bbox_voxel_list[i][1, :]).all(dim=1)
                 xyz_voxel_init[i] = xyz_voxel_init[i][valid_mask]
 
@@ -119,7 +118,7 @@ class Phase1Trainer(QuickSplatTrainer):
                 if rgb_init[i] is not None:
                     rgb_init[i] = rgb_init[i][indices]
 
-            elif test_mode and xyz_voxel_init[i].shape[0] > self.config.DATASET.eval_max_num_points:
+            if test_mode and xyz_voxel_init[i].shape[0] > self.config.DATASET.eval_max_num_points:
                 indices = torch.randperm(xyz_voxel_init[i].shape[0])[:self.config.DATASET.eval_max_num_points]
                 xyz_voxel_init[i] = xyz_voxel_init[i][indices]
                 if rgb_init[i] is not None:
@@ -130,10 +129,6 @@ class Phase1Trainer(QuickSplatTrainer):
                 rgb_orig=rgb_list[i],
                 xyz_voxel_init=xyz_voxel_init[i],
                 rgb_init=rgb_init[i],
-                # scale=params_init[i][:, 0:3],
-                # rgb=params_init[i][:, 3:6],
-                # rotation=params_init[i][:, 6:],
-                # voxel_to_world=transform_list[i],
             )
 
             scaffold = ScaffoldGSFull.create_from_latent(
@@ -513,7 +508,7 @@ class Phase1Trainer(QuickSplatTrainer):
             inner_step_idx = 0
             timestamp = self._get_timestamp(inner_step_idx, self.num_inner_steps)
 
-            point_data = self.load_scene_pair(scene_id)
+            point_data = self.load_scene_point_pair(scene_id)
             scaffold = self.init_scaffold_test(scene_id, test_mode=True)
 
             xyz_voxel = point_data["xyz_voxel"]

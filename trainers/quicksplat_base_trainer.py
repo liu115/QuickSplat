@@ -35,6 +35,7 @@ from models.scaffold_gs import (
 )
 from modules.rasterizer_3d import Camera
 
+from utils.rich_utils import CONSOLE
 from utils.depth import depth_loss, log_depth_loss, compute_full_depth_metrics, save_depth_opencv
 from utils.pose import apply_transform, quaternion_to_normal
 from utils.fusion import MeshExtractor
@@ -204,7 +205,6 @@ class QuickSplatTrainer(BaseTrainer):
         else:
             raise ValueError(f"Unknown gaussian type {self.config.MODEL.gaussian_type}")
         return decoder_class(
-            exp_scale=self.config.MODEL.SCAFFOLD.exp_scale,
             max_scale=self.config.MODEL.SCAFFOLD.max_scale,
             scale_activation=self.config.MODEL.SCAFFOLD.scale_activation,
             offset_scaling=self.config.MODEL.SCAFFOLD.offset_scaling,
@@ -223,7 +223,6 @@ class QuickSplatTrainer(BaseTrainer):
             num_gs=self.config.MODEL.SCAFFOLD.num_gs,
             num_layers=self.config.MODEL.SCAFFOLD.num_layers,
             skip_connect=self.config.MODEL.SCAFFOLD.skip_connect,
-            exp_scale=self.config.MODEL.SCAFFOLD.exp_scale,
             scale_activation=self.config.MODEL.SCAFFOLD.scale_activation,
             max_scale=self.config.MODEL.SCAFFOLD.max_scale,
             quat_rotation=self.config.MODEL.SCAFFOLD.quat_rotation,
@@ -343,7 +342,7 @@ class QuickSplatTrainer(BaseTrainer):
                 point_batch = next(self.train_point_iter)
 
             scene_ids = batch["scene_id"][0]
-            # assert scene_ids == point_batch["scene_id"]
+            assert scene_ids == point_batch["scene_id"], f"Scene ID mismatch: {scene_ids} vs {point_batch['scene_id']}"
             # for key, x in batch.items():
             #     if isinstance(x, torch.Tensor):
             #         print(key, x.shape)
@@ -361,9 +360,6 @@ class QuickSplatTrainer(BaseTrainer):
                 test_mode=False,
             )
             self.current_train_scene_ids = scene_ids
-
-            if self.config.MODEL.model_type == "with_memory" or self.config.MODEL.model_type == "with_feature":
-                assert not self.model.has_memory()
 
             for inner_step_idx in range(self.num_inner_steps):
 
@@ -553,8 +549,8 @@ class QuickSplatTrainer(BaseTrainer):
         # save_ply("xyz_world1.ply", xyz_world.detach().cpu().numpy(), rgb.detach().cpu().numpy())
         xyz_world = apply_transform(scaffold.xyz_voxel.float(), scaffold.transform)
         # save_ply("xyz_world2.ply", xyz_world.detach().cpu().numpy(), rgb.detach().cpu().numpy())
-        features_3d = None
-        point_weights = torch.zeros(xyz_world.shape[0], device=xyz_world.device)
+        # features_3d = None
+        # point_weights = torch.zeros(xyz_world.shape[0], device=xyz_world.device)
 
         with TimerContext("run get_params_grad", self.config.debug):
             for i, x_cpu in enumerate(inner_loader):
@@ -584,7 +580,7 @@ class QuickSplatTrainer(BaseTrainer):
                         render_outputs = self.rasterizer(
                             gs_params,
                             camera,
-                            active_sh_degree=0,     # Does not matter
+                            active_sh_degree=0,     # Does not matter since we are using RGB for color
                         )
                         file_names.append(x_cpu["file_name"][j])
                         images_pred.append(render_outputs["render"].unsqueeze(0))
@@ -602,7 +598,6 @@ class QuickSplatTrainer(BaseTrainer):
                     # counter[valid_gs, :] += 1
                     images_pred = torch.cat(images_pred, dim=0)
                     vis_masks = torch.cat(vis_masks, dim=0)
-                    # print(images_pred.shape)
                     images_gt = x_gpu["rgb"]
 
                     if self.config.MODEL.gaussian_type == "2d":
@@ -639,7 +634,6 @@ class QuickSplatTrainer(BaseTrainer):
                 )
 
                 for j, key in enumerate(param_keys):
-                    # print(i, key, grad_batch[i].shape)
                     grads[key] += (
                         grad_batch[j]
                         .nan_to_num(0)
@@ -649,28 +643,28 @@ class QuickSplatTrainer(BaseTrainer):
                 del grad_batch
                 del loss
 
-                if self.config.MODEL.model_type == "with_feature":
-                    if i == 0:
-                        features_3d_batch = self.model.extract_and_lift_features(
-                            xyz_world,
-                            images_gt,
-                            x_gpu["intrinsic"],
-                            x_gpu["world_to_camera"],
-                            normalize=True,
-                        )   # (num_images, num_points, C)
+                # if self.config.MODEL.model_type == "with_feature":
+                #     if i == 0:
+                #         features_3d_batch = self.model.extract_and_lift_features(
+                #             xyz_world,
+                #             images_gt,
+                #             x_gpu["intrinsic"],
+                #             x_gpu["world_to_camera"],
+                #             normalize=True,
+                #         )   # (num_images, num_points, C)
 
-                        features_3d = (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)    # (num_points, C)
-                    else:
-                        with torch.no_grad():
-                            features_3d_batch = self.model.extract_and_lift_features(
-                                xyz_world,
-                                images_gt,
-                                x_gpu["intrinsic"],
-                                x_gpu["world_to_camera"],
-                                normalize=True,
-                            )
-                        features_3d += (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)   # (num_points, C)
-                    point_weights += vis_masks.sum(dim=0)
+                #         features_3d = (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)    # (num_points, C)
+                #     else:
+                #         with torch.no_grad():
+                #             features_3d_batch = self.model.extract_and_lift_features(
+                #                 xyz_world,
+                #                 images_gt,
+                #                 x_gpu["intrinsic"],
+                #                 x_gpu["world_to_camera"],
+                #                 normalize=True,
+                #             )
+                #         features_3d += (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)   # (num_points, C)
+                #     point_weights += vis_masks.sum(dim=0)
 
             for key in grads.keys():
                 # normalize the channels by the largest values (inf-norm)
@@ -680,9 +674,9 @@ class QuickSplatTrainer(BaseTrainer):
             grad_2d = grad_2d / torch.clamp_min(counter, 1)
             grad_2d_norm = grad_2d_norm / torch.clamp_min(counter, 1)
 
-            if features_3d is not None:
-                features_3d = features_3d / point_weights.clamp_min(1e-12).unsqueeze(-1)
-                grads["latent"] = torch.cat([grads["latent"], features_3d], dim=-1)
+            # if features_3d is not None:
+            #     features_3d = features_3d / point_weights.clamp_min(1e-12).unsqueeze(-1)
+            #     grads["latent"] = torch.cat([grads["latent"], features_3d], dim=-1)
 
             grad_2d = grad_2d.view(-1, num_gs, 2)
             grad_2d = torch.mean(grad_2d, dim=1)
@@ -1162,7 +1156,7 @@ class QuickSplatTrainer(BaseTrainer):
             metrics_list.append(metrics_dict)
         return metrics_list
 
-    def load_scene_pair(
+    def load_scene_point_pair(
         self,
         scene_id: str,
     ):
@@ -1196,8 +1190,61 @@ class QuickSplatTrainer(BaseTrainer):
             "xyz_voxel_gt": xyz_voxel_gt,
             "normal_gt": normal_gt,
             "voxel_to_world": voxel_to_world,
-
             "xyz": xyz,
             "xyz_gt": xyz_gt,
             "rgb_gt": rgb_gt,
         }
+
+    def after_train_step(self, step_idx: int, force_reset: bool = False):
+        reset_dataloader = False
+        if step_idx % self.config.MODEL.OPT.add_step_every == 0:
+            if self.num_inner_steps < self.config.MODEL.OPT.num_steps:
+                self.num_inner_steps += 1
+                CONSOLE.print(f"Adding step, num_inner_steps: {self.num_inner_steps}")
+
+                reset_dataloader = True
+
+        if reset_dataloader or force_reset:
+
+            self.data_generator = np.random.default_rng(self.config.MODEL.SCAFFOLD.seed + self.local_rank + step_idx)
+            self.data_point_generator = np.random.default_rng(self.config.MODEL.SCAFFOLD.seed + self.local_rank + step_idx)
+
+            sampler = RepeatSampler(
+                self.train_dataset,
+                batch_size=self.config.TRAIN.batch_size,
+                num_repeat=self.num_inner_steps,
+                generator=self.data_generator,
+            )
+
+            self.train_loader = DataLoader(
+                self.train_dataset,
+                batch_size=self.config.TRAIN.batch_size,
+                num_workers=self.config.TRAIN.num_workers,
+                # num_workers=0,
+                pin_memory=True,
+                drop_last=True,
+                sampler=sampler,
+            )
+            self.train_iter = iter(self.train_loader)
+
+            sampler = RepeatSampler(
+                self.train_point_dataset,
+                batch_size=self.config.TRAIN.batch_size,
+                num_repeat=1,
+                generator=self.data_point_generator,
+            )
+
+            self.train_point_loader = DataLoader(
+                self.train_point_dataset,
+                batch_size=self.config.TRAIN.batch_size,
+                num_workers=self.config.TRAIN.num_workers,
+                # num_workers=0,
+                pin_memory=True,
+                drop_last=True,
+                sampler=sampler,
+                collate_fn=MultiScannetppPointDataset.collate_fn,
+            )
+            self.train_point_iter = iter(self.train_point_loader)
+
+        # Empty cuda cache
+        torch.cuda.empty_cache()

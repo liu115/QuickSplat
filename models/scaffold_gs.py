@@ -100,7 +100,7 @@ class ScaffoldGSFull(nn.Module):
 
     def get_raw_params(self):
         if self._latent is None:
-            raise ValueError("Please use ScaffoldGSFull.create_from_points() to initialize the model")
+            raise ValueError("Please use ScaffoldGSFull.create_from_latent() or ScaffoldGSFull.create_from_voxel2() to initialize the model")
         return {"latent": self._latent}
 
     def get_raw_opacity(self):
@@ -147,24 +147,24 @@ class ScaffoldGSFull(nn.Module):
         xyz_offset = torch.zeros((xyz_voxel.shape[0], 3), device="cuda")
         xyz_offset = inverse_sigmoid((xyz_offset + 1) / 2)
 
-        if self.scaffold_config.exp_scale:
+        # if self.scaffold_config.exp_scale:
+        if self.scaffold_config.scale_activation == "exp":
             d = scale / self.voxel_size
             scales = torch.log(d)[..., None].repeat(1, 3)
             scales = torch.clamp(scales, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
-        else:
-            if self.scaffold_config.scale_activation == "softplus":
-                d = scale / self.voxel_size
-                d = inverse_softplus(d)
-                d = torch.clamp(d, max=1e2 * self.voxel_size)
-                scales = d[..., None].repeat(1, 3)
-            elif self.scaffold_config.scale_activation == "abs":
-                d = scale / self.voxel_size
-                scales = d[..., None].repeat(1, 3)
-            else:   # sigmoid
-                max_scale = self.scaffold_config.max_scale
-                d = scale / (self.voxel_size * max_scale)
-                d = torch.clamp(d, min=0.0, max=1.0)
-                scales = inverse_sigmoid(d)[..., None].repeat(1, 3)
+        elif self.scaffold_config.scale_activation == "softplus":
+            d = scale / self.voxel_size
+            d = inverse_softplus(d)
+            d = torch.clamp(d, max=1e2 * self.voxel_size)
+            scales = d[..., None].repeat(1, 3)
+        elif self.scaffold_config.scale_activation == "abs":
+            d = scale / self.voxel_size
+            scales = d[..., None].repeat(1, 3)
+        else:   # sigmoid
+            max_scale = self.scaffold_config.max_scale
+            d = scale / (self.voxel_size * max_scale)
+            d = torch.clamp(d, min=0.0, max=1.0)
+            scales = inverse_sigmoid(d)[..., None].repeat(1, 3)
 
         opacity = inverse_sigmoid(opacity)
         rgb = inverse_sigmoid(rgb)
@@ -227,24 +227,24 @@ class ScaffoldGSFull(nn.Module):
             dist = torch.sqrt(dist2)
 
         # scales = torch.log(torch.sqrt(dist2) / voxel_size)[..., None].repeat(1, 3)
-        if config.SCAFFOLD.exp_scale:
+        # if config.SCAFFOLD.exp_scale:
+        if config.SCAFFOLD.scale_activation == "exp":
             d = dist / voxel_size
             scales = torch.log(d)[..., None].repeat(1, 3)
             scales = torch.clamp(scales, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
-        else:
-            if config.SCAFFOLD.scale_activation == "softplus":
-                dist = torch.clamp(dist, min=1e-8, max=1e2)
-                d = dist / voxel_size
-                d = inverse_softplus(d)
-                scales = d[..., None].repeat(1, 3)
-            elif config.SCAFFOLD.scale_activation == "abs":
-                d = dist / voxel_size
-                scales = d[..., None].repeat(1, 3)
-            else:   # sigmoid
-                max_scale = config.SCAFFOLD.max_scale
-                d = dist / (voxel_size * max_scale)
-                d = torch.clamp(d, min=0.0, max=1.0)
-                scales = inverse_sigmoid(d)[..., None].repeat(1, 3)
+        elif config.SCAFFOLD.scale_activation == "softplus":
+            dist = torch.clamp(dist, min=1e-8, max=1e2)
+            d = dist / voxel_size
+            d = inverse_softplus(d)
+            scales = d[..., None].repeat(1, 3)
+        elif config.SCAFFOLD.scale_activation == "abs":
+            d = dist / voxel_size
+            scales = d[..., None].repeat(1, 3)
+        else:   # sigmoid
+            max_scale = config.SCAFFOLD.max_scale
+            d = dist / (voxel_size * max_scale)
+            d = torch.clamp(d, min=0.0, max=1.0)
+            scales = inverse_sigmoid(d)[..., None].repeat(1, 3)
 
         if normal is None:
             rots = torch.zeros((xyz.shape[0], 4), device="cuda")
@@ -275,6 +275,7 @@ class ScaffoldGSFull(nn.Module):
         latent = torch.zeros((xyz.shape[0], hidden_dim), device="cuda")
 
         if is_2dgs:
+            raise NotImplementedError("Fix this TODO")
             latent[:, :3] = xyz_offset
             latent[:, 3:6] = scales
             latent[:, 5] = 0.0  # The third scale dimension doesn't matter
@@ -319,6 +320,7 @@ class ScaffoldGSFull(nn.Module):
         zero_latent: bool = False,
         seed: Optional[int] = None,
     ):
+        raise NotImplementedError("Use create_from_voxels2 instead")
 
         # assert xyz.device == torch.device("cpu")
         dist2 = torch.clamp_min(distCUDA2(xyz), 0.0000001)
@@ -397,6 +399,7 @@ class ScaffoldGSFull(nn.Module):
         zero_latent: bool = False,
         seed: Optional[int] = None,
     ):
+        raise NotImplementedError("Use create_from_voxels2 instead")
         # xyz device should be cpu
         assert xyz.device == torch.device("cpu")
 
@@ -618,7 +621,6 @@ class GSDecoder3D(nn.Module):
         num_layers: int,
         num_gs: int,
         skip_connect: bool,
-        exp_scale: bool = True,
         scale_activation: Literal["sigmoid", "exp", "softplus", "abs"] = "sigmoid",
         max_scale: float = 100.0,
         quat_rotation: bool = False,
@@ -633,7 +635,6 @@ class GSDecoder3D(nn.Module):
 
         self.num_gs = num_gs
         self.skip_connect = skip_connect
-        self.exp_scale = exp_scale
         self.scale_activation = scale_activation
         self.max_scale = max_scale
         self.quat_rotation = quat_rotation
@@ -711,16 +712,15 @@ class GSDecoder3D(nn.Module):
         xyz = xyz_voxel.float()[:, None, :] + xyz_offset_norm
         xyz = apply_transform(xyz, transform)
 
-        if self.exp_scale:
+        if self.scale_activation == "exp":
             scale = torch.clamp(scale, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
             scale = torch.exp(scale) * voxel_size
-        else:
-            if self.scale_activation == "softplus":
-                scale = torch.nn.functional.softplus(scale) * voxel_size
-            elif self.scale_activation == "abs":
-                scale = torch.abs(scale) * voxel_size
-            else:   # sigmoid
-                scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
+        elif self.scale_activation == "softplus":
+            scale = torch.nn.functional.softplus(scale) * voxel_size
+        elif self.scale_activation == "abs":
+            scale = torch.abs(scale) * voxel_size
+        else:   # sigmoid
+            scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
         rotation = torch.nn.functional.normalize(rotation, p=2, dim=-1)
 
         # TODO: Whether to apply transformation on rotation
@@ -808,18 +808,17 @@ class GSDecoder2D(GSDecoder3D):
         xyz = xyz_voxel.float()[:, None, :] + xyz_offset_norm
         xyz = apply_transform(xyz, transform)
 
-        if self.exp_scale:
+        if self.scale_activation == "exp":
             scale = torch.clamp(scale, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
             scale = torch.exp(scale) * voxel_size
-        else:
-            if self.scale_activation == "softplus":
-                scale = torch.nn.functional.softplus(scale) * voxel_size
-            elif self.scale_activation == "abs":
-                scale = torch.abs(scale) * voxel_size
-            else:   # sigmoid
-                scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
-        rotation = torch.nn.functional.normalize(rotation, p=2, dim=-1)
+        elif self.scale_activation == "softplus":
+            scale = torch.nn.functional.softplus(scale) * voxel_size
+        elif self.scale_activation == "abs":
+            scale = torch.abs(scale) * voxel_size
+        else:   # sigmoid
+            scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
 
+        rotation = torch.nn.functional.normalize(rotation, p=2, dim=-1)
         # TODO: Whether to apply transformation on rotation
         opacity = torch.sigmoid(opacity)
         rgb = torch.sigmoid(rgb)
@@ -837,13 +836,11 @@ class GSDecoder2D(GSDecoder3D):
 class GSIdentityDecoder3D(nn.Module):
     def __init__(
         self,
-        exp_scale: bool = True,
         max_scale: float = 100.0,
         scale_activation: Literal["sigmoid", "exp", "softplus", "abs"] = "sigmoid",
         offset_scaling: float = 1.0,
     ):
         super().__init__()
-        self.exp_scale = exp_scale
         self.max_scale = max_scale
         self.scale_activation = scale_activation
         self.offset_scaling = offset_scaling
@@ -873,16 +870,15 @@ class GSIdentityDecoder3D(nn.Module):
         # print("voxel_to_world", transform)
         xyz = apply_transform(xyz, transform)
 
-        if self.exp_scale:
+        if self.scale_activation == "exp":
             scale = torch.clamp(scale, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
             scale = torch.exp(scale) * voxel_size
-        else:
-            if self.scale_activation == "softplus":
-                scale = torch.nn.functional.softplus(scale) * voxel_size
-            elif self.scale_activation == "abs":
-                scale = torch.abs(scale) * voxel_size
-            else:   # sigmoid
-                scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
+        elif self.scale_activation == "softplus":
+            scale = torch.nn.functional.softplus(scale) * voxel_size
+        elif self.scale_activation == "abs":
+            scale = torch.abs(scale) * voxel_size
+        else:   # sigmoid
+            scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
         rotation = torch.nn.functional.normalize(rotation, p=2, dim=-1)
 
         # TODO: Whether to apply transformation on rotation
@@ -928,16 +924,15 @@ class GSIdentityDecoder2D(GSIdentityDecoder3D):
         # print("voxel_to_world", transform)
         xyz = apply_transform(xyz, transform)
 
-        if self.exp_scale:
+        if self.scale_activation == "exp":
             scale = torch.clamp(scale, min=MIN_LOG_SCALE, max=MAX_LOG_SCALE)
             scale = torch.exp(scale) * voxel_size
-        else:
-            if self.scale_activation == "softplus":
-                scale = torch.nn.functional.softplus(scale) * voxel_size
-            elif self.scale_activation == "abs":
-                scale = torch.abs(scale) * voxel_size
-            else:   # sigmoid
-                scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
+        elif self.scale_activation == "softplus":
+            scale = torch.nn.functional.softplus(scale) * voxel_size
+        elif self.scale_activation == "abs":
+            scale = torch.abs(scale) * voxel_size
+        else:   # sigmoid
+            scale = torch.sigmoid(scale) * (voxel_size * self.max_scale)
         rotation = torch.nn.functional.normalize(rotation, p=2, dim=-1)
 
         # TODO: Whether to apply transformation on rotation
