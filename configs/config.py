@@ -73,7 +73,7 @@ _C.MODEL = CN()
 
 # New trainer
 # "2d", "3d"
-_C.MODEL.gaussian_type = "3d"
+_C.MODEL.gaussian_type = "2d"
 # "scaffold", "identity"
 _C.MODEL.decoder_type = "scaffold"
 # neural, with_memory, with_feature
@@ -159,14 +159,15 @@ _C.MODEL.INIT.use_mask_loss = False
 _C.MODEL.INIT.occ_reg_mult = 0.0
 # "opacity+rgb+normal+scale", "opacity+rgb", "opacity"
 _C.MODEL.INIT.init_type = "opacity+rgb+normal+scale"
-_C.MODEL.INIT.opt_enable = True    # For ablation study purposes
+# For ablation study purposes
+_C.MODEL.INIT.opt_enable = False
+_C.MODEL.INIT.train_geometry_only_steps = 0
 
 
 _C.MODEL.DENSIFIER = CN()
 _C.MODEL.DENSIFIER.enable = True
 _C.MODEL.DENSIFIER.model_type = "16unet18"
 _C.MODEL.DENSIFIER.num_dense_blocks = 0
-_C.MODEL.DENSIFIER.train_densify_only_iter = 0
 _C.MODEL.DENSIFIER.sample_num_per_step = 1000
 _C.MODEL.DENSIFIER.sample_num_per_step_eval = 0
 _C.MODEL.DENSIFIER.sample_temperature = 1.0

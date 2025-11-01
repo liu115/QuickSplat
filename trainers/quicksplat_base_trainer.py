@@ -10,14 +10,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 import MinkowskiEngine as ME
 import pytorch3d.transforms as transforms3d
+from PIL import Image
 
 from trainers.base_trainer import BaseTrainer
-from models.optimizer import UNetOptimizer
-from models.initializer import Initializer18
-from models.unet_base import ResUNetConfig
+# TODO: Refactor the dataset
+from dataset.scannetpp import ScannetppDataset
+from dataset.scannetpp import MultiScannetppDataset
+from dataset.scannetpp_points import MultiScannetppPointDataset
+from dataset.scannetpp_points_aabb import MultiScannetppPointAABBDataset
+from dataset.utils import RepeatSampler
+
 from models.scaffold_gs import (
     ScaffoldGSFull,
     GSIdentityDecoder3D,
@@ -29,16 +35,142 @@ from models.scaffold_gs import (
 )
 from modules.rasterizer_3d import Camera
 
-from utils.depth import save_depth, depth_loss, log_depth_loss, compute_full_depth_metrics, save_depth_opencv
-from utils.pose import apply_transform, apply_rotation, quaternion_to_normal
+from utils.depth import depth_loss, log_depth_loss, compute_full_depth_metrics, save_depth_opencv
+from utils.pose import apply_transform, quaternion_to_normal
 from utils.fusion import MeshExtractor
 from utils.utils import TimerContext
 
 
 class QuickSplatTrainer(BaseTrainer):
     def setup_dataloader(self):
-        # TODO
-        raise NotImplementedError("TODO")
+        # Starting from 1 inner step
+        self.num_inner_steps = 1
+
+        if self.config.MODEL.input_type == "mesh":
+            self.ply_path = self.config.DATASET.gt_ply_path
+        else:
+            self.ply_path = self.config.DATASET.ply_path
+
+        use_depth_training = self.config.MODEL.OPT.depth_mult > 0 or self.config.MODEL.OPT.log_depth_mult > 0
+        self.train_dataset = MultiScannetppDataset(
+            self.config.DATASET.source_path,
+            self.ply_path,
+            self.config.DATASET.train_split_path,
+            num_samples=self.config.DATASET.num_target_views,
+            split="train",
+            downsample=self.config.DATASET.image_downsample,
+            num_train_frames=-1,    # Use all training frames for outer loop
+            load_depth=use_depth_training,
+        )
+
+        self.train_point_dataset = MultiScannetppPointAABBDataset(
+            self.config.DATASET.source_path,
+            self.ply_path,
+            self.config.DATASET.gt_ply_path,
+            self.config.DATASET.train_split_path,
+            self.config.DATASET.transform_path,
+            crop_points=False if self.config.MODEL.input_type == "mesh" else True,
+            # crop_points=False,
+            noise_aug=self.config.DATASET.use_point_aug,
+            global_aug=self.config.DATASET.use_point_rotate_aug,
+            color_aug=self.config.DATASET.use_point_color_aug,
+            voxelize_aug=self.config.DATASET.voxelize_aug,
+            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+            max_points=self.config.DATASET.max_num_points,
+            read_normal=False,
+            return_gt=True,
+            read_normal_gt=True,
+        )
+
+        # self.train_point_dataset = MultiScannetppPointDataset(
+        #     self.config.DATASET.source_path,
+        #     self.ply_path,
+        #     self.config.DATASET.gt_ply_path,
+        #     self.config.DATASET.train_split_path,
+        #     # crop_points=False,
+        #     crop_points=True,
+        #     noise_aug=self.config.DATASET.use_point_aug,
+        #     global_aug=self.config.DATASET.use_point_rotate_aug,
+        #     color_aug=self.config.DATASET.use_point_color_aug,
+        #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+        #     max_points=self.config.DATASET.max_num_points,
+        #     read_normal=self.use_normal_from_dataset,
+        # )
+
+        assert self.train_dataset.scene_list == self.train_point_dataset.scene_list
+
+        # To sync the data iterators
+        self.data_generator = np.random.default_rng(self.config.MODEL.SCAFFOLD.seed + self.local_rank)
+        self.data_point_generator = np.random.default_rng(self.config.MODEL.SCAFFOLD.seed + self.local_rank)
+
+        sampler = RepeatSampler(
+            self.train_dataset,
+            batch_size=self.config.TRAIN.batch_size,
+            num_repeat=self.num_inner_steps,
+            # seed=self.config.MODEL.SCAFFOLD.seed,
+            generator=self.data_generator,
+        )
+
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.config.TRAIN.batch_size,
+            num_workers=self.config.TRAIN.num_workers,
+            # num_workers=0,
+            pin_memory=True,
+            drop_last=True,
+            sampler=sampler,
+        )
+
+        sampler = RepeatSampler(
+            self.train_point_dataset,
+            batch_size=self.config.TRAIN.batch_size,
+            num_repeat=1,
+            # seed=self.config.MODEL.SCAFFOLD.seed,
+            generator=self.data_point_generator,
+        )
+
+        self.train_point_loader = DataLoader(
+            self.train_point_dataset,
+            batch_size=self.config.TRAIN.batch_size,
+            num_workers=self.config.TRAIN.num_workers,
+            # num_workers=0,
+            pin_memory=True,
+            drop_last=True,
+            sampler=sampler,
+            collate_fn=MultiScannetppPointDataset.collate_fn,
+        )
+
+        self.train_iter = iter(self.train_loader)
+        self.train_point_iter = iter(self.train_point_loader)
+
+        # TODO: Try this
+        self.val_dataset = MultiScannetppPointAABBDataset(
+            self.config.DATASET.source_path,
+            self.ply_path,
+            self.config.DATASET.gt_ply_path,
+            self.config.DATASET.val_split_path,
+            self.config.DATASET.transform_path,
+            crop_points=False if self.config.MODEL.input_type == "mesh" else True,
+            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+        )
+
+        # self.val_dataset = MultiScannetppPointDataset(
+        #     self.config.DATASET.source_path,
+        #     self.ply_path,
+        #     self.config.DATASET.gt_ply_path,
+        #     self.config.DATASET.val_split_path,
+        #     crop_points=True,
+        #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+        # )
+
+        # self.val_loader = DataLoader(
+        #     self.val_dataset,
+        #     batch_size=1,
+        #     shuffle=False,
+        #     num_workers=0,
+        #     pin_memory=False,
+        #     drop_last=False,
+        # )
 
     def get_inner_dataset(self, scene_id, fixed=False):
         # TODO
@@ -152,9 +284,9 @@ class QuickSplatTrainer(BaseTrainer):
                 # Ignore the existing points in "bxyz" in each level
                 # Could be a problem where most of the voxels are ignored
                 valid_mask = ~ignore_mask
-                if self.config.debug:
-                    ratio = valid_mask.sum() / valid_mask.numel()
-                    print(f"{idx}: valid: {valid_mask.sum()}/{valid_mask.numel()}, ratio: {ratio:.2f}")
+                # if self.config.debug:
+                #     ratio = valid_mask.sum() / valid_mask.numel()
+                #     print(f"{idx}: valid: {valid_mask.sum()}/{valid_mask.numel()}, ratio: {ratio:.2f}")
                 pred = pred[valid_mask]
                 gt = gt[valid_mask]
 
@@ -163,8 +295,8 @@ class QuickSplatTrainer(BaseTrainer):
                 num_neg = gt.numel() - num_pos
                 pos_weight = num_neg / num_pos
                 pos_weight = pos_weight.detach()
-                if self.config.debug:
-                    print(f"{idx}: shape: {gt.shape}, weight: {pos_weight:.2f}")
+                # if self.config.debug:
+                #     print(f"{idx}: shape: {gt.shape}, weight: {pos_weight:.2f}")
             else:
                 pos_weight = None
             occ = nn.functional.binary_cross_entropy_with_logits(
@@ -188,7 +320,6 @@ class QuickSplatTrainer(BaseTrainer):
         """
         self._model.train()
         self.best_psnr = 0.0
-        self.num_inner_steps = 1    # Gradually increase during the training
 
         num_iterations = self.config.TRAIN.num_iterations
         if self.world_size > 1:
@@ -880,3 +1011,193 @@ class QuickSplatTrainer(BaseTrainer):
             rgb,
             zero_latent,
         ], dim=-1)
+
+    @torch.no_grad()
+    def evaluate_gs(
+        self,
+        scaffold: ScaffoldGSFull,
+        scene_id: str,
+        save_path: Optional[Path] = None,
+        save_file_suffix: str = "",
+        save_cat: bool = True,
+        save_rgb_out: bool = True,
+        save_depth_out: bool = True,
+        use_identity: bool = False,
+    ) -> List[Dict[str, float]]:
+        """Compute the validation metrics"""
+        dataset = ScannetppDataset(
+            self.config.DATASET.source_path,
+            self.ply_path,
+            scene_id=scene_id,
+            split="val",
+            downsample=self.config.DATASET.image_downsample,
+            load_depth=True,
+            subsample_randomness=False,
+        )
+
+        val_loader = DataLoader(
+            dataset,
+            batch_size=1,
+            shuffle=False,
+            # num_workers=0,
+            num_workers=self.config.TRAIN.num_workers,
+            pin_memory=False,
+            drop_last=False,
+        )
+
+        # Get the gs attributes
+        params = scaffold.get_raw_params()
+        if use_identity:
+            gs_params = self.identity_decoder(
+                latent=params["latent"],
+                xyz_voxel=scaffold.xyz_voxel,
+                transform=scaffold.transform,
+                voxel_size=scaffold.voxel_size,
+            )
+        else:
+            # Use the original decoder that was used for training
+            gs_params = self.scaffold_decoder(
+                latent=params["latent"],
+                xyz_voxel=scaffold.xyz_voxel,
+                transform=scaffold.transform,
+                voxel_size=scaffold.voxel_size,
+            )
+        # Reshape the gs attributes from (N, M, C) to (N*M, C)
+        for key in gs_params:
+            gs_params[key] = gs_params[key].flatten(0, 1).contiguous()
+
+        scale_norm = torch.mean(torch.norm(gs_params["scale"], p=2, dim=-1))
+        opacity = torch.mean(gs_params["opacity"])
+
+        # Compute the metrics
+        metrics_list = []
+        for batch_idx, batch_cpu in enumerate(val_loader):
+            batch_gpu = self.move_to_device(batch_cpu)
+            # batch_size is 1
+            assert batch_gpu["rgb"].shape[0] == 1
+
+            camera = Camera(
+                fov_x=float(batch_cpu["fov_x"][0]),
+                fov_y=float(batch_cpu["fov_y"][0]),
+                height=int(batch_cpu["height"][0]),
+                width=int(batch_cpu["width"][0]),
+                image=batch_gpu["rgb"][0],
+                world_view_transform=batch_gpu["world_view_transform"][0],
+                full_proj_transform=batch_gpu["full_proj_transform"][0],
+                camera_center=batch_gpu["camera_center"][0],
+            )
+            render_outputs = self.rasterizer(
+                gs_params,
+                camera,
+                active_sh_degree=0,     # Does not matter
+            )
+
+            if self.config.MODEL.gaussian_type == "3d":
+                # Additionally render the depth
+                depth_expected = self.rasterizer.render_depth(gs_params, camera)
+                render_outputs["depth_expected"] = depth_expected
+
+            image_pred = torch.clamp(render_outputs["render"], 0, 1).unsqueeze(0)
+            image_gt = torch.clamp(batch_gpu["rgb"], 0, 1)
+            l1_loss = self.l1(image_pred, image_gt)
+            psnr = self.psnr(image_pred, image_gt)
+            ssim = self.ssim(image_pred, image_gt)
+            lpips = self.lpips(image_pred, image_gt)
+
+            complete_ratio = 0.0
+            alpha_avg = 0.0
+            if "alpha" in render_outputs:
+                complete_ratio = torch.mean((render_outputs["alpha"] > 0.01).float()).item()
+                alpha_avg = torch.mean(render_outputs["alpha"]).item()
+
+            num_points = scaffold.num_points
+            num_gs = gs_params["xyz"].shape[0]
+
+            if save_path is not None:
+                if save_cat:
+                    image_combined = torch.cat([image_gt, image_pred], dim=-1)
+                else:
+                    image_combined = image_pred
+                image_combined = image_combined[0].permute(1, 2, 0).cpu().numpy()
+                image_combined = (image_combined * 255).astype("uint8")
+                image_combined = Image.fromarray(image_combined)
+                image_combined = image_combined.resize((image_combined.width, image_combined.height))
+                save_path.mkdir(parents=True, exist_ok=True)
+                if save_file_suffix == "":
+                    if save_rgb_out:
+                        image_combined.save(save_path / f"{scene_id}_{batch_idx:04d}.jpg")
+                    save_depth_path = save_path / f"{scene_id}_{batch_idx:04d}_depth.jpg"
+                else:
+                    if save_rgb_out:
+                        image_combined.save(save_path / f"{scene_id}_{batch_idx:04d}_{save_file_suffix}.jpg")
+                    save_depth_path = save_path / f"{scene_id}_{batch_idx:04d}_{save_file_suffix}_depth.jpg"
+
+                if "depth_expected" in render_outputs:
+                    if save_cat:
+                        depth_combined = torch.cat([batch_gpu["depth"], render_outputs["depth_expected"]], dim=-1)
+                    else:
+                        depth_combined = render_outputs["depth_expected"]
+                    if save_depth_out:
+                        save_depth_opencv(depth_combined, save_depth_path)
+
+            metrics_dict = {
+                "l1_loss": l1_loss.item(),
+                "psnr": psnr.item(),
+                "ssim": ssim.item(),
+                "lpips": lpips.item(),
+                "scale": scale_norm.item(),
+                "opacity": opacity.item(),
+                "num_points": num_points,
+                "num_gs": num_gs,
+                "complete_ratio": complete_ratio,
+                "alpha_avg": alpha_avg,
+            }
+
+            if "depth_expected" in render_outputs:
+                expected_depth_metrics = compute_full_depth_metrics(render_outputs["depth_expected"], batch_gpu["depth"])
+                metrics_dict.update({f"depth_expected_{k}": v.item() for k, v in expected_depth_metrics.items()})
+            if "depth_median" in render_outputs:
+                median_depth_metrics = compute_full_depth_metrics(render_outputs["depth_median"], batch_gpu["depth"])
+                metrics_dict.update({f"depth_median_{k}": v.item() for k, v in median_depth_metrics.items()})
+            metrics_list.append(metrics_dict)
+        return metrics_list
+
+    def load_scene_pair(
+        self,
+        scene_id: str,
+    ):
+        xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
+            scene_id,
+            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+            crop_points=True,
+        )
+        xyz_gt, rgb_gt, xyz_voxel_gt, *_, normal_gt = self.val_dataset.load_voxelized_mesh_points(
+            scene_id,
+            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+            bbox_min=bbox[0],
+            bbox_max=bbox[1],
+            load_normal=True,
+        )
+
+        xyz = torch.from_numpy(xyz).float().to(self.device)
+        rgb = torch.from_numpy(rgb).float().to(self.device)
+        xyz_voxel = torch.from_numpy(xyz_voxel).float().to(self.device)
+        voxel_to_world = torch.from_numpy(world_to_voxel).float().to(self.device).inverse()
+        bbox_voxel = torch.from_numpy(bbox_voxel).int().to(self.device)
+
+        xyz_gt = torch.from_numpy(xyz_gt).float().to(self.device)
+        rgb_gt = torch.from_numpy(rgb_gt).float().to(self.device)
+        xyz_voxel_gt = torch.from_numpy(xyz_voxel_gt).int().to(self.device)
+        normal_gt = torch.from_numpy(normal_gt).float().to(self.device)
+        return {
+            "xyz_voxel": xyz_voxel,
+            "rgb": rgb,
+            "bbox_voxel": bbox_voxel,
+            "xyz_voxel_gt": xyz_voxel_gt,
+            "normal_gt": normal_gt,
+            "voxel_to_world": voxel_to_world,
+
+            "xyz": xyz,
+            "xyz_gt": xyz_gt,
+            "rgb_gt": rgb_gt,
+        }

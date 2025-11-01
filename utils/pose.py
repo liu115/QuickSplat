@@ -16,9 +16,10 @@ def apply_rotation(xyz, matrix):
     return xyz_out
 
 
-def quaternion_to_normal(quat):
+def quaternion_to_normal(quat, normalize: bool = True):
     # TODO: Check if this is correct in 2DGS
-    quat = torch.nn.functional.normalize(quat, p=2, dim=-1)
+    if normalize:
+        quat = torch.nn.functional.normalize(quat, p=2, dim=-1)
     matrix = transforms3d.quaternion_to_matrix(quat)
     normal = matrix[:, :, 2]    # <- this is correct
     # normal = matrix[:, 2, :]

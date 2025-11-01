@@ -72,7 +72,7 @@ class Rasterizer(torch.nn.Module):
 
     def render_depth(
         self,
-        gaussians: GaussianModel,
+        gaussians,
         camera: Camera,
         scale_modifier: float = 1.0,
     ):
@@ -115,7 +115,7 @@ class Rasterizer(torch.nn.Module):
 
     def forward(
         self,
-        gaussians: GaussianModel,
+        gaussians,
         camera: Camera,
         override_bg_color: Optional[torch.Tensor] = None,
         override_color: Optional[torch.Tensor] = None,

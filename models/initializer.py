@@ -454,8 +454,6 @@ class Initializer(GenerativeRes16UNetCatBase):
 
         if self.use_time_emb:
             assert timestamp is not None
-            # print(get_timestep_embedding(timestamp, self.temb_ch))
-            # breakpoint()
             time_emb = get_timestep_embedding(timestamp, self.temb_ch)
             time_emb = self.temb(time_emb)
         else:

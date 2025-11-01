@@ -12,13 +12,14 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 import MinkowskiEngine as ME
 from pytorch3d import ops
+from pytorch3d import transforms as transforms3d
 
 from trainers.quicksplat_base_trainer import QuickSplatTrainer
 from models.optimizer import UNetOptimizer
 from models.initializer import Initializer18
 from models.densifier import Densifier
 from models.unet_base import ResUNetConfig
-from models.scaffold_gs import ScaffoldGSFull
+from models.scaffold_gs import ScaffoldGSFull, inverse_sigmoid, inverse_softplus
 from modules.rasterizer_3d import ScaffoldRasterizer, Camera
 from modules.rasterizer_2d import Scaffold2DGSRasterizer
 
@@ -106,80 +107,160 @@ class Phase2Trainer(QuickSplatTrainer):
         }
         self.optimizer = Optimizer(param_dict, self.config.OPTIMIZER)
 
-    def init_scaffold_test(self, scene_id: str, test_mode: bool = False) -> ScaffoldGSFull:
-        assert test_mode, "Test mode must be True in init_scaffold_test"
+    @torch.no_grad()
+    def init_scaffold_train_batch(
+        self,
+        xyz_list: List[torch.Tensor],
+        rgb_list: List[torch.Tensor],
+        xyz_voxel_list: List[torch.Tensor],
+        transform_list: List[torch.Tensor],     # voxel_to_world transform
+        bbox_list: List[torch.Tensor],
+        bbox_voxel_list: Optional[List[torch.Tensor]] = None,
+        test_mode: bool = False,
+    ) -> List[ScaffoldGSFull]:
+        batch_size = len(xyz_list)
+        scaffold_list = []
 
-        # By default, don't use normal unless specified
-        normal = None
-        bbox_voxel = None
-        if self.config.MODEL.input_type == "colmap" or self.config.MODEL.input_type == "colmap+completion":
-            crop_points = True
-            # crop_points = False
-            # if self.config.MODEL.input_type == "colmap+completion":
-            #     # To help the completion
-            #     crop_points = True
-
-            # xyz, rgb = self.val_dataset.load_colmap_points(scene_id, crop_points=crop_points)
-            # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel = voxelize(
-            #     xyz,
-            #     rgb,
-            #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-            # )
-            xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
-                scene_id,
-                voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-                crop_points=crop_points,
-            )
-            bbox_voxel = torch.from_numpy(bbox_voxel).int().to(self.device)
-
-        elif self.config.MODEL.input_type == "mesh":
-            if self.config.MODEL.init_type == "xyz+rgb+normal":
-                xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, normal = self.val_dataset.load_voxelized_mesh_points(
-                    scene_id,
-                    voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-                    load_normal=True,
-                )
-                # xyz, rgb, normal = self.val_dataset.load_point_with_normal(scene_id)
-
-                # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, normal = voxelize(
-                #     xyz,
-                #     rgb,
-                #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-                #     xyz_world=normal,
-                # )
-                normal = torch.from_numpy(normal).float().to(self.device)
-
-            elif self.config.MODEL.init_type == "xyz+rgb":
-                # xyz, rgb = self.val_dataset.load_mesh_points(scene_id)
-                # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel = voxelize(
-                #     xyz,
-                #     rgb,
-                #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-                # )
-                xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, _ = self.val_dataset.load_voxelized_mesh_points(
-                    scene_id,
-                    voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-                    load_normal=False,
-                )
-
-        xyz = torch.from_numpy(xyz).float().to(self.device)
-        rgb = torch.from_numpy(rgb).float().to(self.device)
-        xyz_voxel = torch.from_numpy(xyz_voxel).float().to(self.device)
-        xyz_offset = torch.from_numpy(xyz_offset).float().to(self.device)
-        voxel_to_world = torch.from_numpy(world_to_voxel).float().to(self.device).inverse()
-        bbox = torch.from_numpy(bbox).float().to(self.device)
-
-        return self.init_scaffold_train(
-            xyz,
-            rgb,
-            xyz_voxel,
-            xyz_offset,
-            voxel_to_world,
-            bbox,
-            bbox_voxel=bbox_voxel,
-            normal=normal,
-            test_mode=test_mode,
+        bxyz_input, _ = xyz_list_to_bxyz(xyz_voxel_list)
+        rgb_input = torch.cat(rgb_list, dim=0)
+        sparse_tensor_input = ME.SparseTensor(features=rgb_input, coordinates=bxyz_input)
+        initializer_outputs = self.initializer(
+            sparse_tensor_input,
+            gt_coords=bxyz_input,       # Doesn't matter for evaluation
+            # max_samples_second_last=self.config.DATASET.max_num_points * self.config.TRAIN.batch_size // 8,
+            verbose=self.config.debug,
         )
+        output_sparse = initializer_outputs["out"]
+        occ_logits_last = initializer_outputs["last_prob"]
+
+        xyz_voxel_init, params_init = output_sparse.decomposed_coordinates_and_features
+        for i in range(batch_size):
+            valid_mask = (xyz_voxel_init[i] >= bbox_voxel_list[i][0, :]).all(dim=1) & (xyz_voxel_init[i] <= bbox_voxel_list[i][1, :]).all(dim=1)
+            xyz_voxel_init[i] = xyz_voxel_init[i][valid_mask]
+            params_init[i] = params_init[i][valid_mask]
+            occ = occ_logits_last.features_at(batch_index=i)[valid_mask]
+
+            if not test_mode and xyz_voxel_init[i].shape[0] > self.config.DATASET.max_num_points:
+                indices = torch.randperm(xyz_voxel_init[i].shape[0])[:self.config.DATASET.max_num_points]
+                xyz_voxel_init[i] = xyz_voxel_init[i][indices]
+                params_init[i] = params_init[i][indices]
+                occ = occ[indices]
+            elif test_mode and xyz_voxel_init[i].shape[0] > self.config.DATASET.eval_max_num_points:
+                indices = torch.randperm(xyz_voxel_init[i].shape[0])[:self.config.DATASET.eval_max_num_points]
+                xyz_voxel_init[i] = xyz_voxel_init[i][indices]
+                params_init[i] = params_init[i][indices]
+                occ = occ[indices]
+
+            if self.config.MODEL.gaussian_type == "3d":
+                latent_init = self._build_init_latents(
+                    xyz_voxel_orig=xyz_voxel_list[i],
+                    rgb_orig=rgb_list[i],
+                    xyz_voxel_init=xyz_voxel_init[i],
+                    scale=params_init[i][:, 0:3],
+                    opacity=occ,
+                    rgb=params_init[i][:, 3:6],
+                    rotation=params_init[i][:, 6:],
+                    voxel_to_world=transform_list[i],
+                )
+            else:
+                latent_init = self._build_init_latents(
+                    xyz_voxel_orig=xyz_voxel_list[i],
+                    rgb_orig=rgb_list[i],
+                    xyz_voxel_init=xyz_voxel_init[i],
+                    scale=params_init[i][:, 0:2],
+                    opacity=occ,
+                    rgb=params_init[i][:, 2:5],
+                    rotation=params_init[i][:, 5:],
+                    voxel_to_world=transform_list[i],
+                )
+
+            scaffold = ScaffoldGSFull.create_from_latent(
+                self.config.MODEL,
+                xyz_voxel=xyz_voxel_init[i],
+                latent=latent_init,
+                bbox=bbox_list[i],
+                voxel_to_world_transform=transform_list[i],
+                voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+                spatial_lr_scale=1.0,
+            )
+            scaffold_list.append(scaffold)
+
+        return scaffold_list
+
+    # def init_scaffold_test(self, scene_id: str, test_mode: bool = False) -> ScaffoldGSFull:
+    #     assert test_mode, "Test mode must be True in init_scaffold_test"
+
+    #     # By default, don't use normal unless specified
+    #     normal = None
+    #     bbox_voxel = None
+    #     if self.config.MODEL.input_type == "colmap" or self.config.MODEL.input_type == "colmap+completion":
+    #         crop_points = True
+    #         # crop_points = False
+    #         # if self.config.MODEL.input_type == "colmap+completion":
+    #         #     # To help the completion
+    #         #     crop_points = True
+
+    #         # xyz, rgb = self.val_dataset.load_colmap_points(scene_id, crop_points=crop_points)
+    #         # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel = voxelize(
+    #         #     xyz,
+    #         #     rgb,
+    #         #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #         # )
+    #         xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
+    #             scene_id,
+    #             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #             crop_points=crop_points,
+    #         )
+    #         bbox_voxel = torch.from_numpy(bbox_voxel).int().to(self.device)
+
+    #     elif self.config.MODEL.input_type == "mesh":
+    #         if self.config.MODEL.init_type == "xyz+rgb+normal":
+    #             xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, normal = self.val_dataset.load_voxelized_mesh_points(
+    #                 scene_id,
+    #                 voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #                 load_normal=True,
+    #             )
+    #             # xyz, rgb, normal = self.val_dataset.load_point_with_normal(scene_id)
+
+    #             # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, normal = voxelize(
+    #             #     xyz,
+    #             #     rgb,
+    #             #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #             #     xyz_world=normal,
+    #             # )
+    #             normal = torch.from_numpy(normal).float().to(self.device)
+
+    #         elif self.config.MODEL.init_type == "xyz+rgb":
+    #             # xyz, rgb = self.val_dataset.load_mesh_points(scene_id)
+    #             # xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel = voxelize(
+    #             #     xyz,
+    #             #     rgb,
+    #             #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #             # )
+    #             xyz, rgb, xyz_voxel, xyz_offset, bbox, world_to_voxel, _ = self.val_dataset.load_voxelized_mesh_points(
+    #                 scene_id,
+    #                 voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+    #                 load_normal=False,
+    #             )
+
+    #     xyz = torch.from_numpy(xyz).float().to(self.device)
+    #     rgb = torch.from_numpy(rgb).float().to(self.device)
+    #     xyz_voxel = torch.from_numpy(xyz_voxel).float().to(self.device)
+    #     xyz_offset = torch.from_numpy(xyz_offset).float().to(self.device)
+    #     voxel_to_world = torch.from_numpy(world_to_voxel).float().to(self.device).inverse()
+    #     bbox = torch.from_numpy(bbox).float().to(self.device)
+
+    #     return self.init_scaffold_train(
+    #         xyz,
+    #         rgb,
+    #         xyz_voxel,
+    #         xyz_offset,
+    #         voxel_to_world,
+    #         bbox,
+    #         bbox_voxel=bbox_voxel,
+    #         normal=normal,
+    #         test_mode=test_mode,
+    #     )
 
     def init_scaffold_train(
         self,
@@ -219,10 +300,102 @@ class Phase2Trainer(QuickSplatTrainer):
             spatial_lr_scale=1.0,
             normal=normal,
             seed=seed,
-            # is_2dgs=self.config.MODEL.gaussian_type == "2d",
             unit_scale=self.config.MODEL.SCAFFOLD.unit_scale,
             unit_scale_multiplier=self.config.MODEL.SCAFFOLD.unit_scale_multiplier,
         )
+
+    @torch.no_grad()
+    def init_scaffold_test(self, scene_id: str, test_mode: bool = False) -> ScaffoldGSFull:
+        assert test_mode, "Test mode must be True in init_scaffold_test"
+        crop_points = True
+        xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
+            scene_id,
+            voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
+            crop_points=crop_points,
+        )
+        xyz = torch.from_numpy(xyz).float().to(self.device)
+        rgb = torch.from_numpy(rgb).float().to(self.device)
+        xyz_voxel = torch.from_numpy(xyz_voxel).float().to(self.device)
+        xyz_offset = torch.from_numpy(xyz_offset).float().to(self.device)
+        voxel_to_world = torch.from_numpy(world_to_voxel).float().to(self.device).inverse()
+        bbox = torch.from_numpy(bbox).float().to(self.device)
+        bbox_voxel = torch.from_numpy(bbox_voxel).int().to(self.device)
+
+        scaffolds = self.init_scaffold_train_batch(
+            [xyz],
+            [rgb],
+            [xyz_voxel],
+            [voxel_to_world],
+            [bbox],
+            [bbox_voxel],
+            test_mode=test_mode,
+        )
+        return scaffolds[0]
+
+    def _build_init_latents(
+        self,
+        xyz_voxel_orig: torch.Tensor,
+        rgb_orig: torch.Tensor,
+        xyz_voxel_init: torch.Tensor,
+        scale: torch.Tensor,
+        opacity: torch.Tensor,
+        rgb: torch.Tensor,
+        rotation: torch.Tensor,
+        voxel_to_world: torch.Tensor,
+    ):
+        if "rgb" not in self.config.MODEL.INIT.init_type:
+            # Use averaged color from the original points
+            dist, indices, _ = ops.knn_points(
+                xyz_voxel_init.unsqueeze(0).float(),
+                xyz_voxel_orig.unsqueeze(0).float(),
+                K=8,
+                norm=2,
+                return_nn=False,
+            )
+            dist = dist[0]              # (N, K)
+            indices = indices[0]
+            rgb = rgb_orig[indices, :]   # (N, K, 3)
+            # Average the color based on the distance
+            weights = 1 / (dist + 1e-6)
+            weights = weights / weights.sum(dim=1, keepdim=True)
+            rgb = (rgb * weights.unsqueeze(-1)).sum(dim=1)
+
+        if "opacity" not in self.config.MODEL.DENSIFIER.init_type:
+            opacity = torch.ones_like(opacity) * self.config.MODEL.GSPLAT.init_opacity
+            opacity = inverse_sigmoid(opacity)
+
+        if "scale" not in self.config.MODEL.DENSIFIER.init_type:
+            scale = torch.ones_like(scale) * self.config.MODEL.SCAFFOLD.unit_scale_multiplier * self.config.MODEL.SCAFFOLD.voxel_size
+            scale = torch.clamp(scale, min=1e-8, max=1e2)
+            scale = scale / self.config.MODEL.SCAFFOLD.voxel_size
+            scale = inverse_softplus(scale)
+
+        if "normal" not in self.config.MODEL.DENSIFIER.init_type:
+            rotation = torch.zeros_like(rotation)
+            rotation[:, 0] = 1.0
+        else:
+            # Transform the rotation from AABB voxel space to world space
+            voxel_to_world_rot = voxel_to_world[None, :3, :3] / self.config.MODEL.SCAFFOLD.voxel_size
+            voxel_to_world_rot = transforms3d.matrix_to_quaternion(voxel_to_world_rot)
+
+            assert self.config.MODEL.DENSIFIER.init_rot_reverse, "init_rot_reverse must be True"
+            if not self.config.MODEL.DENSIFIER.init_rot_reverse:
+                # TODO: Have to think about the order
+                rotation = transforms3d.quaternion_multiply(rotation, voxel_to_world_rot)
+            else:
+                # <- this is correct
+                rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
+
+        xyz_offsets = torch.zeros(rgb.shape[0], 3, device=rgb.device)
+
+        latent = torch.cat([xyz_offsets, scale, rotation, opacity, rgb], dim=1)
+        zero_latent = torch.zeros(
+            rgb.shape[0],
+            self.config.MODEL.SCAFFOLD.hidden_dim - latent.shape[1],
+            device=rgb.device,
+        )
+        latent = torch.cat([latent, zero_latent], dim=-1)
+        return latent
 
     @torch.no_grad()
     def _densify(
@@ -329,7 +502,7 @@ class Phase2Trainer(QuickSplatTrainer):
         step_idx: int,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Any]:
         if self.config.MODEL.DENSIFIER.enable:
-            if self.config.MODEL.DENSIFIER.train_densify_only_iter > 0 and step_idx < self.config.MODEL.DENSIFIER.train_densify_only_iter:
+            if self.config.MODEL.DENSIFIER.train_densify_only_steps > 0 and step_idx < self.config.MODEL.DENSIFIER.train_densify_only_steps:
                 return self.train_step_densifier_only(batch_cpu, point_batch, inner_step_idx, step_idx)
             else:
                 return self.train_step_end_to_end(batch_cpu, point_batch, inner_step_idx, step_idx)
