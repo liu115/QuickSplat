@@ -237,10 +237,9 @@ class QuickSplatTrainer(BaseTrainer):
             scaffold_decoder = self.get_identity_decoder()
         elif self.config.MODEL.decoder_type == "scaffold":
             scaffold_decoder = self.get_scaffold_decoder()
-        if self.world_size > 1:
-            self.scaffold_decoder = DDP(scaffold_decoder, device_ids=[self.local_rank], find_unused_parameters=True)
-        else:
-            self.scaffold_decoder = scaffold_decoder
+            if self.world_size > 1:
+                scaffold_decoder = DDP(scaffold_decoder, device_ids=[self.local_rank], find_unused_parameters=False)
+        self.scaffold_decoder = scaffold_decoder
 
         self.identity_decoder = self.get_identity_decoder()
 
@@ -367,18 +366,12 @@ class QuickSplatTrainer(BaseTrainer):
                     batch, point_batch, inner_step_idx, step_idx,
                 )
                 loss = functools.reduce(torch.add, loss_dict.values())
-                loss_dict["total_loss"] = loss
+                # loss_dict["total_loss"] = loss
                 loss.backward()
 
                 self.before_optimizer(step_idx)
 
                 norm_dict = self.optimizer.get_max_norm()
-
-                if self.config.MODEL.OPT.decoder_update_last_only:
-                    raise NotImplementedError("TODO: Remove")
-                    # if inner_step_idx != self.num_inner_steps - 1:
-                    #     # Don't update the scaffold decoder unless it's the last step
-                    #     self.optimizer.zero_grad_target("decoder")
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -386,6 +379,9 @@ class QuickSplatTrainer(BaseTrainer):
                 # Shouldn't encounter StopIteration here
                 if inner_step_idx < self.num_inner_steps - 1:
                     batch = next(self.train_iter)
+
+                loss_dict = {key: val.item() for key, val in loss_dict.items()}
+                del loss
 
             self.after_train_step(step_idx)
 
@@ -524,7 +520,7 @@ class QuickSplatTrainer(BaseTrainer):
 
             _, inner_loader = self.get_inner_dataset(scene_id, fixed=fixed)
 
-            if self.world_size > 1:
+            if self.world_size > 1 and self.config.MODEL.decoder_type == "scaffold":
                 gs_params = self.scaffold_decoder.module(
                     latent=params["latent"],
                     xyz_voxel=scaffold.xyz_voxel,
@@ -984,27 +980,15 @@ class QuickSplatTrainer(BaseTrainer):
             rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
 
         xyz_offsets = torch.zeros(rgb.shape[0], 3, device=rgb.device)
+
+        latent = torch.cat([xyz_offsets, scale, rotation, opacity, rgb], dim=1)
         zero_latent = torch.zeros(
             rgb.shape[0],
-            (
-                self.config.MODEL.SCAFFOLD.hidden_dim
-                - xyz_offsets.shape[-1]
-                - scale.shape[-1]
-                - rotation.shape[-1]
-                - opacity.shape[-1]
-                - rgb.shape[-1]
-            ),
+            self.config.MODEL.SCAFFOLD.hidden_dim - latent.shape[1],
             device=rgb.device,
         )
-
-        return torch.cat([
-            xyz_offsets,
-            scale,
-            rotation,
-            opacity,
-            rgb,
-            zero_latent,
-        ], dim=-1)
+        latent = torch.cat([latent, zero_latent], dim=-1)
+        return latent
 
     @torch.no_grad()
     def evaluate_gs(

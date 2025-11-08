@@ -81,7 +81,7 @@ _C.MODEL.model_type = "neural"
 # mesh, colmap, colmap+completion
 _C.MODEL.input_type = "mesh"
 # xyz+rgb, xyz+rgb+normal, xyz+rgb+normal+scale
-_C.MODEL.init_type = "xyz+rgb"
+# _C.MODEL.init_type = "xyz+rgb"
 _C.MODEL.use_identity_loss = False
 
 # "dino", "dino_decoder"
@@ -181,6 +181,8 @@ _C.MODEL.DENSIFIER.recompute_grad = False
 # occupancy_as_opacity should be true unless ablation
 _C.MODEL.DENSIFIER.occupancy_as_opacity = True
 _C.MODEL.DENSIFIER.num_densify_steps_eval = 10
+_C.MODEL.DENSIFIER.train_densify_only_steps = 0
+
 
 _C.MODEL.GSPLAT = CN()
 _C.MODEL.GSPLAT.init_num_points = 100_000
@@ -240,8 +242,8 @@ def get_default_opt_config():
 _C.OPTIMIZER = CN()
 _C.OPTIMIZER.model = get_default_opt_config()
 
-_C.OPTIMIZER.scaffold = get_default_opt_config()
-_C.OPTIMIZER.scaffold.lr = 1e-4
+_C.OPTIMIZER.densifier = get_default_opt_config()
+_C.OPTIMIZER.densifier.lr = 1e-4
 
 _C.OPTIMIZER.decoder = get_default_opt_config()
 _C.OPTIMIZER.decoder.lr = 2e-4

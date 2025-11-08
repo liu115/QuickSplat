@@ -78,6 +78,11 @@ class Phase1Trainer(QuickSplatTrainer):
         }
         self.optimizer = Optimizer(param_dict, self.config.OPTIMIZER)
 
+    def get_all_model_state_dict(self):
+        return {
+            "model": self.model.state_dict(),
+        }
+
     @torch.no_grad()
     def init_scaffold_train_batch(
         self,
@@ -89,28 +94,31 @@ class Phase1Trainer(QuickSplatTrainer):
         bbox_voxel_list: Optional[List[torch.Tensor]] = None,
         test_mode: bool = False,
     ) -> List[ScaffoldGSFull]:
+        # assert self.config.MODEL.input_type == "colmap", "Phase1Trainer init_scaffold_train_batch only supports colmap input"
         batch_size = len(xyz_list)
         scaffold_list = []
+        xyz_voxel_init = xyz_voxel_list
+        rgb_init = rgb_list
 
-        if self.config.MODEL.input_type == "colmap+completion":
-            xyz_voxel_init = []
-            rgb_init = [None for _ in range(batch_size)]
-        else:
-            xyz_voxel_init = xyz_voxel_list
-            rgb_init = rgb_list
+        # if self.config.MODEL.input_type == "colmap+completion":
+        #     xyz_voxel_init = []
+        #     rgb_init = [None for _ in range(batch_size)]
+        # else:
+        #     xyz_voxel_init = xyz_voxel_list
+        #     rgb_init = rgb_list
 
         for i in range(batch_size):
             # For loop version: slower but use less memory
-            if self.config.MODEL.input_type == "colmap+completion":
-                bxyz_input, _ = xyz_list_to_bxyz([xyz_voxel_list[i]])
-                features_input = torch.ones(bxyz_input.shape[0], 1, device=bxyz_input.device, dtype=torch.float32)
-                sparse_tensor_input = ME.SparseTensor(features=features_input, coordinates=bxyz_input)
-                initializer_outputs = self.sgnn(sparse_tensor_input, gt_coords=bxyz_input)
-                output_sparse = initializer_outputs["out"]
-                xyz_voxel_init.append(output_sparse.C[:, 1:].clone())
+            # if self.config.MODEL.input_type == "colmap+completion":
+            #     bxyz_input, _ = xyz_list_to_bxyz([xyz_voxel_list[i]])
+            #     features_input = torch.ones(bxyz_input.shape[0], 1, device=bxyz_input.device, dtype=torch.float32)
+            #     sparse_tensor_input = ME.SparseTensor(features=features_input, coordinates=bxyz_input)
+            #     initializer_outputs = self.sgnn(sparse_tensor_input, gt_coords=bxyz_input)
+            #     output_sparse = initializer_outputs["out"]
+            #     xyz_voxel_init.append(output_sparse.C[:, 1:].clone())
 
-                valid_mask = (xyz_voxel_init[i] >= bbox_voxel_list[i][0, :]).all(dim=1) & (xyz_voxel_init[i] <= bbox_voxel_list[i][1, :]).all(dim=1)
-                xyz_voxel_init[i] = xyz_voxel_init[i][valid_mask]
+            #     valid_mask = (xyz_voxel_init[i] >= bbox_voxel_list[i][0, :]).all(dim=1) & (xyz_voxel_init[i] <= bbox_voxel_list[i][1, :]).all(dim=1)
+            #     xyz_voxel_init[i] = xyz_voxel_init[i][valid_mask]
 
             if not test_mode and xyz_voxel_init[i].shape[0] > self.config.DATASET.max_num_points:
                 indices = torch.randperm(xyz_voxel_init[i].shape[0])[:self.config.DATASET.max_num_points]
@@ -284,6 +292,8 @@ class Phase1Trainer(QuickSplatTrainer):
             # normal_loss = 1 - torch.sum(normal_pred * normal_gt, dim=1)
             normal_loss = 1 - torch.abs(torch.sum(normal_pred * normal_gt, dim=1))
             loss_dict["normal_loss"] = normal_loss.nan_to_num().mean() * self.config.MODEL.OPT.normal_loss_mult
+        else:
+            raise NotImplementedError("Normal loss must be enabled in geometry-only training")
 
         with torch.no_grad():
             chamfer_full = chamfer_dist(xyz_densified[0], xyz_gt[0], norm=1)

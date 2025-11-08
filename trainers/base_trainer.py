@@ -66,12 +66,9 @@ class BaseTrainer:
         self._model = self.get_model()
         self._model.to(self.device)
         if self.world_size > 1:
-            self._model = cast(
-                nn.Module,
-                DDP(self._model, device_ids=[local_rank], find_unused_parameters=True),
-            )
+            self._model = DDP(self._model, device_ids=[local_rank], find_unused_parameters=False)
+            CONSOLE.print("DDP initialized")
             dist.barrier(device_ids=[local_rank])
-        print(f"Model trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}")
 
         self.setup_modules()
 
@@ -91,7 +88,7 @@ class BaseTrainer:
     def model(self) -> nn.Module:
         """Returns the unwrapped model if in ddp"""
         if isinstance(self._model, DDP):
-            return cast(nn.Module, self._model.module)
+            return self._model.module
         return self._model
 
     def setup_dataloader(self):
@@ -265,6 +262,11 @@ class BaseTrainer:
         self.load_timer = Timer()
         self.inference_timer = Timer()
 
+    def get_all_model_state_dict(self):
+        return {
+            "model": self.model.state_dict(),
+        }
+
     @check_main_thread
     def save_checkpoint(self, step_idx: int, metrics_dict: Dict[str, float]) -> None:
         """Save the model and optimizers
@@ -279,7 +281,7 @@ class BaseTrainer:
         ckpt_path: Path = checkpoint_dir / f"step-{step_idx:09d}.ckpt"
         checkpoint = {
             "step": step_idx,
-            "model": self.model.state_dict(),
+            **self.get_all_model_state_dict(),
         }
         if hasattr(self, "optimizer"):
             checkpoint["optimizer"] = self.optimizer.state_dict()

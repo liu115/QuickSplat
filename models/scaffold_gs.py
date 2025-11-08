@@ -275,13 +275,11 @@ class ScaffoldGSFull(nn.Module):
         latent = torch.zeros((xyz.shape[0], hidden_dim), device="cuda")
 
         if is_2dgs:
-            raise NotImplementedError("Fix this TODO")
             latent[:, :3] = xyz_offset
-            latent[:, 3:6] = scales
-            latent[:, 5] = 0.0  # The third scale dimension doesn't matter
-            latent[:, 6:10] = rots
-            latent[:, 10:11] = opacities
-            latent[:, 11:14] = rgb
+            latent[:, 3:5] = scales     # only use two scale dimensions
+            latent[:, 5:9] = rots
+            latent[:, 9:10] = opacities
+            latent[:, 10:13] = rgb
         else:
             latent[:, :3] = xyz_offset
             latent[:, 3:6] = scales

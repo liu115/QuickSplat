@@ -2,6 +2,7 @@ from typing import Dict, Any, List
 import torch
 
 from utils.scheduler import get_exponential_scheduler
+from utils.rich_utils import CONSOLE
 
 
 class Optimizer:
@@ -21,10 +22,10 @@ class Optimizer:
             params = list(params)
             if param_config.lr > 0 and len(list(params)) > 0:
                 optimizer = self.get_optimizer(params, param_config)
-                print(f"Setup optimizer {name} with {param_config.optimizer_type} LR={param_config.lr} (total {sum(p.numel() for p in params):,} params)")
+                CONSOLE.print(f"Setup optimizer {name} with {param_config.optimizer_type} LR={param_config.lr} (total {sum(p.numel() for p in params):,} params)")
                 scheduler = self.get_scheduler(optimizer, param_config)
                 if scheduler is not None:
-                    print(f"Setup scheduler {name} {param_config.scheduler_type}")
+                    CONSOLE.print(f"Setup scheduler {name} {param_config.scheduler_type}")
                 self.optimizers[name] = optimizer
                 self.schedulers[name] = scheduler
                 self.parameters[name] = params

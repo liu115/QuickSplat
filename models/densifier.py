@@ -53,15 +53,18 @@ class DensifierUNet(GenerativeRes16UNetCatBase):
         anchor_coords: the coordinates that will be insert for each level
         """
         assert threshold >= 0 and threshold <= 1, f"Threshold should be in [0, 1], got {threshold}"
+        threshold = torch.tensor([threshold], device=x.device)
         threshold = inverse_sigmoid(threshold)
         if threshold_second_last is not None:
             assert threshold_second_last >= 0 and threshold_second_last <= 1, f"Threshold_second_last should be in [0, 1], got {threshold_second_last}"
+            threshold_second_last = torch.tensor([threshold_second_last], device=x.device)
             threshold_second_last = inverse_sigmoid(threshold_second_last)
         else:
             threshold_second_last = threshold
 
         if threshold_last is not None:
             assert threshold_last >= 0 and threshold_last <= 1, f"Threshold_last should be in [0, 1], got {threshold_last}"
+            threshold_last = torch.tensor([threshold_last], device=x.device)
             threshold_last = inverse_sigmoid(threshold_last)
         else:
             threshold_last = threshold
@@ -341,10 +344,12 @@ class Densifier(nn.Module):
         config,
         in_dim: int,
         out_dim: int,
+        is_2dgs: bool = True,
         occupancy_as_opacity: bool = True,
     ):
         super().__init__()
         self.config = config
+        self.is_2dgs = is_2dgs
         self.occupancy_as_opacity = occupancy_as_opacity
 
         self.compress = MLP(
@@ -359,8 +364,8 @@ class Densifier(nn.Module):
 
         # dense18 by default
         self.unet = DensifierUNet18(
-            in_channels=self.config.MODEL.SCAFFOLD.hidden_dim,
-            out_channels=self.config.MODEL.SCAFFOLD.hidden_dim,
+            in_channels=in_dim,
+            out_channels=out_dim,
             config=ResUNetConfig(),
             use_time_emb=True,
             time_emb_dim=64,
@@ -441,11 +446,18 @@ class Densifier(nn.Module):
             # This enable backpropagation from rendering loss to the SGNN
             # Put prob into the outputs["out"] at 10:11 dimension
             prob = outputs["last_prob"]
-            feat_new = torch.cat([
-                output_sparse.F[..., :10],
-                prob,
-                output_sparse.F[..., 10:],
-            ], dim=1)
+            if self.is_2dgs:
+                feat_new = torch.cat([
+                    output_sparse.F[..., :9],
+                    prob,
+                    output_sparse.F[..., 9:],
+                ], dim=1)
+            else:
+                feat_new = torch.cat([
+                    output_sparse.F[..., :10],
+                    prob,
+                    output_sparse.F[..., 10:],
+                ], dim=1)
         else:
             feat_new = output_sparse.F
 
