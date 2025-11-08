@@ -36,6 +36,7 @@ class Phase2Trainer(QuickSplatTrainer):
                 config=self.config,
                 in_dim=self.config.MODEL.SCAFFOLD.hidden_dim,
                 out_dim=self.config.MODEL.SCAFFOLD.hidden_dim,
+                is_2dgs=self.config.MODEL.gaussian_type == "2d",
                 occupancy_as_opacity=self.config.MODEL.DENSIFIER.occupancy_as_opacity,
             ).to(self.device)
 
@@ -83,7 +84,7 @@ class Phase2Trainer(QuickSplatTrainer):
                 ckpt_path = sorted(ckpt_path.glob("*.ckpt"))[-1]
             ckpt = torch.load(ckpt_path, map_location="cpu")
             self.initializer.load_state_dict(ckpt["model"])
-            CONSOLE.print(f"Loaded SGNN checkpoint from {ckpt_path}")
+            CONSOLE.print(f"Loaded Initializer checkpoint from {ckpt_path}")
 
     def get_model(self) -> nn.Module:
         self.setup_decoders()
@@ -100,10 +101,27 @@ class Phase2Trainer(QuickSplatTrainer):
         # param_dict = self.model.get_param_groups()
         param_dict = {
             "model": self.model.parameters(),
-            "densifier": self.densifier.parameters(),
             "decoder": self.scaffold_decoder.parameters(),
         }
+        if self.config.MODEL.DENSIFIER.enable:
+            param_dict["densifier"] = self.densifier.parameters()
         self.optimizer = Optimizer(param_dict, self.config.OPTIMIZER)
+
+    def get_all_model_state_dict(self):
+        all_state_dict = {}
+        all_state_dict["model"] = self.model.state_dict()
+
+        if self.config.MODEL.DENSIFIER.enable:
+            if self.world_size > 1:
+                all_state_dict["densifier"] = self.densifier.module.state_dict()
+            else:
+                all_state_dict["densifier"] = self.densifier.state_dict()
+        if self.config.MODEL.decoder_type == "scaffold":
+            if self.world_size > 1:
+                all_state_dict["decoder"] = self.scaffold_decoder.module.state_dict()
+            else:
+                all_state_dict["decoder"] = self.scaffold_decoder.state_dict()
+        return all_state_dict
 
     @torch.no_grad()
     def init_scaffold_train_batch(
@@ -360,17 +378,17 @@ class Phase2Trainer(QuickSplatTrainer):
             weights = weights / weights.sum(dim=1, keepdim=True)
             rgb = (rgb * weights.unsqueeze(-1)).sum(dim=1)
 
-        if "opacity" not in self.config.MODEL.DENSIFIER.init_type:
+        if "opacity" not in self.config.MODEL.INIT.init_type:
             opacity = torch.ones_like(opacity) * self.config.MODEL.GSPLAT.init_opacity
             opacity = inverse_sigmoid(opacity)
 
-        if "scale" not in self.config.MODEL.DENSIFIER.init_type:
+        if "scale" not in self.config.MODEL.INIT.init_type:
             scale = torch.ones_like(scale) * self.config.MODEL.SCAFFOLD.unit_scale_multiplier * self.config.MODEL.SCAFFOLD.voxel_size
             scale = torch.clamp(scale, min=1e-8, max=1e2)
             scale = scale / self.config.MODEL.SCAFFOLD.voxel_size
             scale = inverse_softplus(scale)
 
-        if "normal" not in self.config.MODEL.DENSIFIER.init_type:
+        if "normal" not in self.config.MODEL.INIT.init_type:
             rotation = torch.zeros_like(rotation)
             rotation[:, 0] = 1.0
         else:
@@ -378,13 +396,14 @@ class Phase2Trainer(QuickSplatTrainer):
             voxel_to_world_rot = voxel_to_world[None, :3, :3] / self.config.MODEL.SCAFFOLD.voxel_size
             voxel_to_world_rot = transforms3d.matrix_to_quaternion(voxel_to_world_rot)
 
-            assert self.config.MODEL.DENSIFIER.init_rot_reverse, "init_rot_reverse must be True"
-            if not self.config.MODEL.DENSIFIER.init_rot_reverse:
-                # TODO: Have to think about the order
-                rotation = transforms3d.quaternion_multiply(rotation, voxel_to_world_rot)
-            else:
-                # <- this is correct
-                rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
+            # assert self.config.MODEL.INIT.init_rot_reverse, "init_rot_reverse must be True"
+            # if not self.config.MODEL.INIT.init_rot_reverse:
+            #     # TODO: Have to think about the order
+            #     rotation = transforms3d.quaternion_multiply(rotation, voxel_to_world_rot)
+            # else:
+            #     # <- this is correct
+            #     rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
+            rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
 
         xyz_offsets = torch.zeros(rgb.shape[0], 3, device=rgb.device)
 
@@ -644,33 +663,6 @@ class Phase2Trainer(QuickSplatTrainer):
             )
         )
 
-        # loss_dict.update(self.compute_outer_loss(images_pred, images_gt))
-        # other_stuff["images_pred"] = images_pred.detach()
-        # other_stuff["images_gt"] = images_gt.detach()
-
-        # if self.config.MODEL.scale_2d_reg_mult > 0:
-        #     loss_dict["scale_2d_reg_loss"] = 0.0
-        #     # Eq 7 in paper: \sum_i \max (0, min(scale) - \eps)
-        #     for i in range(len(self.scaffolds)):
-        #         scale = gs_params[i]["scale"]
-        #         scale_with_min_axis = torch.min(scale, dim=1).values
-        #         reg_loss = torch.clamp(scale_with_min_axis - 1e-2, min=0) / len(self.scaffolds)
-        #         loss_dict["scale_2d_reg_loss"] += torch.mean(reg_loss) * self.config.MODEL.scale_2d_reg_mult
-
-        # if self.config.MODEL.scale_3d_reg_mult > 0:
-        #     loss_dict["scale_3d_reg_loss"] = 0.0
-        #     for i in range(len(self.scaffolds)):
-        #         scale = gs_params[i]["scale"]
-        #         reg_loss = torch.mean(torch.norm(scale, p=2, dim=1)) / len(self.scaffolds)
-        #         loss_dict["scale_3d_reg_loss"] += reg_loss * self.config.MODEL.scale_3d_reg_mult
-
-        # if self.config.MODEL.opacity_reg_mult > 0:
-        #     loss_dict["opacity_reg_loss"] = 0.0
-        #     for i in range(len(self.scaffolds)):
-        #         opacity = gs_params[i]["opacity"]
-        #         reg_loss = torch.mean(opacity) / len(self.scaffolds)
-        #         loss_dict["opacity_reg_loss"] += reg_loss * self.config.MODEL.opacity_reg_mult
-
         with torch.no_grad():
             images_pred = torch.clamp(images_pred, 0, 1)
             images_gt = torch.clamp(images_gt, 0, 1)
@@ -706,6 +698,8 @@ class Phase2Trainer(QuickSplatTrainer):
         inner_step_idx: int,
         step_idx: int,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Any]:
+        # TODO: Update this part
+        raise NotImplementedError("train_step_densifier_only is not implemented yet")
 
         timestamp = self._get_timestamp(inner_step_idx, self.num_inner_steps)
 
@@ -926,6 +920,7 @@ class Phase2Trainer(QuickSplatTrainer):
         inner_step_idx: int,
         step_idx: int,
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Any]:
+        assert self.config.MODEL.DENSIFIER.enable
         timestamp = self._get_timestamp(inner_step_idx, self.num_inner_steps)
 
         other_stuff = {}        # For debugging purposes
@@ -1260,7 +1255,18 @@ class Phase2Trainer(QuickSplatTrainer):
             other_stuff,
         )
 
+    def validate_without_densifier(self, step_idx: int, save_path: Optional[str] = None) -> Dict[str, float]:
+        self.model.eval()
+        self.scaffold_decoder.eval()
+        # TODO: Implement validation without densifier
+
+        self.model.train()
+        self.scaffold_decoder.train()
+
     def validate(self, step_idx: int, save_path: Optional[str] = None) -> Dict[str, float]:
+        if not self.config.MODEL.DENSIFIER.enable:
+            return self.validate_without_densifier(step_idx, save_path)
+
         self.model.eval()
         self.densifier.eval()
         self.scaffold_decoder.eval()
