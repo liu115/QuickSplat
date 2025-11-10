@@ -112,7 +112,6 @@ class BaseTrainer:
     def train(self):
         self._model.train()
 
-        # for step_idx in tqdm(range(self._start_step, self._start_step + num_iterations), desc="Training"):
         step_idx = 0
         num_epoch = self.config.TRAIN.num_epochs
         grad_acc = self.config.TRAIN.grad_acc

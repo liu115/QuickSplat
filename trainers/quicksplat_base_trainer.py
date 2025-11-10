@@ -1,4 +1,4 @@
-from typing import Any, Union, Optional, List, Tuple, Dict, Literal
+from typing import Optional, List, Tuple, Dict, Literal
 from pathlib import Path
 import functools
 import time
@@ -37,8 +37,6 @@ from modules.rasterizer_3d import Camera
 
 from utils.rich_utils import CONSOLE
 from utils.depth import depth_loss, log_depth_loss, compute_full_depth_metrics, save_depth_opencv
-from utils.pose import apply_transform, quaternion_to_normal
-from utils.fusion import MeshExtractor
 from utils.utils import TimerContext
 
 
@@ -83,21 +81,6 @@ class QuickSplatTrainer(BaseTrainer):
             read_normal_gt=True,
         )
 
-        # self.train_point_dataset = MultiScannetppPointDataset(
-        #     self.config.DATASET.source_path,
-        #     self.ply_path,
-        #     self.config.DATASET.gt_ply_path,
-        #     self.config.DATASET.train_split_path,
-        #     # crop_points=False,
-        #     crop_points=True,
-        #     noise_aug=self.config.DATASET.use_point_aug,
-        #     global_aug=self.config.DATASET.use_point_rotate_aug,
-        #     color_aug=self.config.DATASET.use_point_color_aug,
-        #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-        #     max_points=self.config.DATASET.max_num_points,
-        #     read_normal=self.use_normal_from_dataset,
-        # )
-
         assert self.train_dataset.scene_list == self.train_point_dataset.scene_list
 
         # To sync the data iterators
@@ -126,7 +109,6 @@ class QuickSplatTrainer(BaseTrainer):
             self.train_point_dataset,
             batch_size=self.config.TRAIN.batch_size,
             num_repeat=1,
-            # seed=self.config.MODEL.SCAFFOLD.seed,
             generator=self.data_point_generator,
         )
 
@@ -134,7 +116,6 @@ class QuickSplatTrainer(BaseTrainer):
             self.train_point_dataset,
             batch_size=self.config.TRAIN.batch_size,
             num_workers=self.config.TRAIN.num_workers,
-            # num_workers=0,
             pin_memory=True,
             drop_last=True,
             sampler=sampler,
@@ -144,7 +125,6 @@ class QuickSplatTrainer(BaseTrainer):
         self.train_iter = iter(self.train_loader)
         self.train_point_iter = iter(self.train_point_loader)
 
-        # TODO: Try this
         self.val_dataset = MultiScannetppPointAABBDataset(
             self.config.DATASET.source_path,
             self.ply_path,
@@ -155,26 +135,7 @@ class QuickSplatTrainer(BaseTrainer):
             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
         )
 
-        # self.val_dataset = MultiScannetppPointDataset(
-        #     self.config.DATASET.source_path,
-        #     self.ply_path,
-        #     self.config.DATASET.gt_ply_path,
-        #     self.config.DATASET.val_split_path,
-        #     crop_points=True,
-        #     voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-        # )
-
-        # self.val_loader = DataLoader(
-        #     self.val_dataset,
-        #     batch_size=1,
-        #     shuffle=False,
-        #     num_workers=0,
-        #     pin_memory=False,
-        #     drop_last=False,
-        # )
-
     def get_inner_dataset(self, scene_id, fixed=False):
-        # TODO
         inner_train_dataset = ScannetppDataset(
             self.config.DATASET.source_path,
             self.ply_path,
@@ -539,11 +500,10 @@ class QuickSplatTrainer(BaseTrainer):
                 gs_params[key] = gs_params[key].flatten(0, 1).contiguous()
                 # print(key, gs_params[key].shape)
 
-        # TODO: Figure out using which as xyz_world
-        xyz_world = gs_params["xyz"]
-        rgb = gs_params["rgb"]
+        # xyz_world = gs_params["xyz"]
+        # rgb = gs_params["rgb"]
         # save_ply("xyz_world1.ply", xyz_world.detach().cpu().numpy(), rgb.detach().cpu().numpy())
-        xyz_world = apply_transform(scaffold.xyz_voxel.float(), scaffold.transform)
+        # xyz_world = apply_transform(scaffold.xyz_voxel.float(), scaffold.transform)
         # save_ply("xyz_world2.ply", xyz_world.detach().cpu().numpy(), rgb.detach().cpu().numpy())
         # features_3d = None
         # point_weights = torch.zeros(xyz_world.shape[0], device=xyz_world.device)
@@ -639,29 +599,6 @@ class QuickSplatTrainer(BaseTrainer):
                 del grad_batch
                 del loss
 
-                # if self.config.MODEL.model_type == "with_feature":
-                #     if i == 0:
-                #         features_3d_batch = self.model.extract_and_lift_features(
-                #             xyz_world,
-                #             images_gt,
-                #             x_gpu["intrinsic"],
-                #             x_gpu["world_to_camera"],
-                #             normalize=True,
-                #         )   # (num_images, num_points, C)
-
-                #         features_3d = (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)    # (num_points, C)
-                #     else:
-                #         with torch.no_grad():
-                #             features_3d_batch = self.model.extract_and_lift_features(
-                #                 xyz_world,
-                #                 images_gt,
-                #                 x_gpu["intrinsic"],
-                #                 x_gpu["world_to_camera"],
-                #                 normalize=True,
-                #             )
-                #         features_3d += (features_3d_batch * vis_masks.unsqueeze(-1)).sum(dim=0)   # (num_points, C)
-                #     point_weights += vis_masks.sum(dim=0)
-
             for key in grads.keys():
                 # normalize the channels by the largest values (inf-norm)
                 denom = grads[key].norm(p=torch.inf, dim=0, keepdim=True).clamp_min(1e-12)
@@ -670,21 +607,15 @@ class QuickSplatTrainer(BaseTrainer):
             grad_2d = grad_2d / torch.clamp_min(counter, 1)
             grad_2d_norm = grad_2d_norm / torch.clamp_min(counter, 1)
 
-            # if features_3d is not None:
-            #     features_3d = features_3d / point_weights.clamp_min(1e-12).unsqueeze(-1)
-            #     grads["latent"] = torch.cat([grads["latent"], features_3d], dim=-1)
-
             grad_2d = grad_2d.view(-1, num_gs, 2)
             grad_2d = torch.mean(grad_2d, dim=1)
 
             grad_2d_norm = grad_2d_norm.view(-1, num_gs, 1)
             grad_2d_norm = torch.mean(grad_2d_norm, dim=1)
-            # SUM
             return {
                 "grad_input": grads,
                 "grad_2d": grad_2d,
                 "grad_2d_norm": grad_2d_norm,
-                # "features_3d": features_3d,
                 "file_names": file_names,
             }
 
@@ -971,12 +902,6 @@ class QuickSplatTrainer(BaseTrainer):
             # Transform the rotation from AABB voxel space to world space
             voxel_to_world_rot = voxel_to_world[None, :3, :3] / self.config.MODEL.SCAFFOLD.voxel_size
             voxel_to_world_rot = transforms3d.matrix_to_quaternion(voxel_to_world_rot)
-
-            # if not self.config.MODEL.DENSIFIER.init_rot_reverse:
-            #     # TODO: Have to think about the order
-            #     rotation = transforms3d.quaternion_multiply(rotation, voxel_to_world_rot)
-            # else:
-            #     # <- this is correct
             rotation = transforms3d.quaternion_multiply(voxel_to_world_rot, rotation)
 
         xyz_offsets = torch.zeros(rgb.shape[0], 3, device=rgb.device)
