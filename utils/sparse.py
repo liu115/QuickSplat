@@ -1,9 +1,11 @@
 from typing import List, Tuple, Optional, Literal
 
+import numpy as np
 import torch
 import pytorch3d.ops
 import pytorch3d.loss
 import MinkowskiEngine as ME
+import open3d as o3d
 
 
 def xyz_list_to_bxyz(
@@ -373,3 +375,42 @@ def compute_sparse_iou_with_mask(
     f1 = 2 * (precision * recall) / (precision + recall + eps)
     # print(f"precision: {precision}, recall: {recall}, iou: {iou}, f1: {f1}")
     return precision, recall, iou, f1
+
+
+def chamfer_dist_mesh_with_crop(
+    verts_input: torch.Tensor,
+    faces_input: torch.Tensor,
+    verts_gt: torch.Tensor,
+    faces_gt: torch.Tensor,
+    boundary_ratio: float = 1.2,
+    norm: int = 2,
+    direction: Literal["bidirection", "pred_to_gt", "gt_to_pred"] = "bidirection",
+    num_sampled_points: int = 200_000,
+    **kwargs,
+):
+    """
+    Compute chamfer distance between two meshes by uniformly a fix number of points on the meshes
+    """
+    mesh_input = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(verts_input.cpu().numpy()),
+        triangles=o3d.utility.Vector3iVector(faces_input.cpu().numpy()),
+    )
+    mesh_gt = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(verts_gt.cpu().numpy()),
+        triangles=o3d.utility.Vector3iVector(faces_gt.cpu().numpy()),
+    )
+
+    pcd_input = mesh_input.sample_points_uniformly(number_of_points=num_sampled_points)
+    pcd_gt = mesh_gt.sample_points_uniformly(number_of_points=num_sampled_points)
+
+    xyz_input = torch.from_numpy(np.asarray(pcd_input.points)).to(verts_input.device)
+    xyz_gt = torch.from_numpy(np.asarray(pcd_gt.points)).to(verts_gt.device)
+
+    return chamfer_dist_with_crop(
+        xyz_input,
+        xyz_gt,
+        boundary_ratio,
+        norm,
+        direction,
+        **kwargs,
+    )

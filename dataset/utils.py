@@ -394,3 +394,63 @@ def get_translation_matrix(translation):
     matrix = np.eye(4)
     matrix[:3, 3] = translation
     return matrix
+
+
+def voxelize(
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    voxel_size: float,
+    bbox_min: Optional[np.ndarray] = None,
+    bbox_max: Optional[np.ndarray] = None,
+    xyz_world: Optional[np.ndarray] = None,
+):
+    """Voxelize the point cloud. Crop the point cloud to the bounding box. Remove duplicates in the same voxel.
+
+    Returns:
+        xyz: (N, 3) point coordinates
+        rgb: (N, 3) point colors
+        xyz_voxel: (N, 3) voxel coordinates (int)
+        xyz_offset: (N, 3) offset from the voxel coordinates. assuming the voxel is at the center of the voxel
+        bbox: (2, 3) bounding
+        transform: (4, 4) transformation matrix that does voxelization (from world to voxel space)
+    """
+
+    if bbox_min is None:
+        bbox_min = np.min(xyz, axis=0)
+    if bbox_max is None:
+        bbox_max = np.max(xyz, axis=0)
+
+    # Remove points outside the bounding box
+    mask = np.all((xyz >= bbox_min) & (xyz <= bbox_max), axis=1)
+    # print("Remove points outside the bounding box:", np.sum(~mask))
+    xyz = xyz[mask]
+
+    # The voxelization transform (xyz - bbox_min) / voxel_size
+    transform = np.eye(4)
+    transform[:3, 3] = -bbox_min / voxel_size
+    transform[:3, :3] *= 1 / voxel_size
+
+    xyz_voxel = apply_transform(xyz, transform.astype(np.float32))
+    xyz_voxel_int = np.floor(xyz_voxel).astype(np.int32)
+    # The offset is between [-0.5, 0.5]
+    xyz_offset = (xyz_voxel - xyz_voxel_int - 0.5)
+
+    # The voxel center should be +0.5
+    shift_transform = np.eye(4)
+    shift_transform[:3, 3] = -0.5
+    transform = shift_transform @ transform
+
+    # Remove duplicates in the same voxel
+    xyz_voxel_int, mapping = np.unique(xyz_voxel_int, axis=0, return_index=True)
+    xyz = xyz[mapping]
+    xyz_offset = xyz_offset[mapping]
+
+    # Prepare output
+    bbox = np.array([bbox_min, bbox_max])
+    rgb = rgb[mask][mapping]
+    if xyz_world is not None:
+        # Do the same thing as rgb
+        xyz_world = xyz_world[mask][mapping]
+        return xyz, rgb, xyz_voxel_int, xyz_offset, bbox, transform, xyz_world
+
+    return xyz, rgb, xyz_voxel_int, xyz_offset, bbox, transform

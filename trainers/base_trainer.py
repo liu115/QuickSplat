@@ -46,6 +46,7 @@ class BaseTrainer:
         self.world_size = world_size
         self.local_rank = local_rank
         self.device: str = "cpu" if world_size == 0 else f"cuda:{local_rank}"
+        self.best_psnr_for_saving = None
 
         # if ckpt_path is not None:
         #     if os.path.isdir(ckpt_path):
@@ -286,11 +287,18 @@ class BaseTrainer:
             checkpoint["optimizer"] = self.optimizer.state_dict()
         torch.save(checkpoint, ckpt_path)
         CONSOLE.print(f"Saved checkpoint to {ckpt_path}")
+
+        best_ckpt_path = checkpoint_dir / "best.ckpt"
+        if self.best_psnr_for_saving is None or metrics_dict["psnr"] > self.best_psnr_for_saving:
+            self.best_psnr_for_saving = metrics_dict["psnr"]
+            CONSOLE.print(f"New best PSNR: {self.best_psnr_for_saving:.4f}, saving to {best_ckpt_path}")
+            torch.save(checkpoint, best_ckpt_path)
+
         # possibly delete old checkpoints
         if self.config.save_only_latest_checkpoint:
             # delete everything else in the checkpoint folder
             for f in checkpoint_dir.glob("*"):
-                if f != ckpt_path:
+                if f != ckpt_path and f != best_ckpt_path:
                     f.unlink()
 
     def load_checkpoint(self, ckpt_path: str) -> None:

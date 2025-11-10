@@ -100,17 +100,16 @@ class MeshExtractor:
         faces = torch.from_numpy(np.asarray(mesh.triangles)).long()
 
         if output_path is not None:
+            # Save two meshes: full and cropped_top (for better visualization) assuming it's single-level indoor scenes with ceilings
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             cleaned_mesh = self.clean_mesh(mesh)
-            o3d.io.write_triangle_mesh(str(output_path).replace(".ply", "_raw.ply"), cleaned_mesh)
+            o3d.io.write_triangle_mesh(str(output_path), cleaned_mesh)
             if crop_top:
                 xyz_min = np.min(np.asarray(mesh.vertices), axis=0)
                 xyz_max = np.max(np.asarray(mesh.vertices), axis=0)
                 xyz_max[2] = 2.5
                 new_mesh = cleaned_mesh.crop(o3d.geometry.AxisAlignedBoundingBox(xyz_min[:, None], xyz_max[:, None]))
-                # Crop out the top 15% of the mesh
-                # new_xyz_max = (xyz_max - xyz_min) * np.array([1, 1, 0.85]) + xyz_min
-                o3d.io.write_triangle_mesh(str(output_path), new_mesh)
+                o3d.io.write_triangle_mesh(str(output_path).replace(".ply", "_crop.ply"), new_mesh)
 
             print(f"Saved mesh to {output_path}")
         return vertices, faces
@@ -133,4 +132,3 @@ class MeshExtractor:
         mesh.remove_triangles_by_mask(triangles_to_remove)
         mesh = mesh.remove_unreferenced_vertices()
         return mesh
-

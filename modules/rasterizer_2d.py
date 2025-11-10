@@ -194,3 +194,101 @@ class Scaffold2DGSRasterizer(nn.Module):
             "viewspace_points": means2D,
             "visibility_filter": radii > 0,
         }
+
+
+@dataclass
+class GaussianModelAbstract:
+    get_xyz: torch.Tensor
+    get_opacity: torch.Tensor
+    get_features: torch.Tensor
+    get_scaling: torch.Tensor
+    get_rotation: torch.Tensor
+    active_sh_degree: int
+
+
+class Full2DGSRasterizer(Scaffold2DGSRasterizer):
+    def forward(
+        self,
+        gaussians: GaussianModelAbstract,
+        camera: Camera,
+        override_bg_color: Optional[torch.Tensor] = None,
+        override_color: Optional[torch.Tensor] = None,
+        scale_modifier: float = 1.0,
+        depth_source: Literal["median", "expected"] = "expected",
+    ):
+        if override_bg_color is not None:
+            bg_color = override_bg_color
+        else:
+            bg_color = self.bg_color
+
+        # The device of bg_color is the same as the device of gaussians
+        assert len(bg_color.shape) == 1
+        assert bg_color.shape[0] == 3
+        assert bg_color.device == gaussians.get_xyz.device
+
+        if override_color is not None:
+            assert override_color.shape[0] == gaussians.get_xyz.shape[0]
+        rasterizer = self.get_rasterizer(camera, bg_color, scale_modifier, gaussians.active_sh_degree)
+
+        screenspace_points = torch.zeros_like(gaussians.get_xyz, requires_grad=True)
+        screenspace_points.retain_grad()
+
+        means3D = gaussians.get_xyz.contiguous()
+        opacity = gaussians.get_opacity.contiguous()
+        shs = gaussians.get_features.contiguous()
+        scales = gaussians.get_scaling.contiguous()
+        rotations = gaussians.get_rotation.contiguous()
+
+        rendered_image, radii, other_maps = rasterizer(
+            means3D=means3D,
+            means2D=screenspace_points,
+            shs=shs,
+            colors_precomp=None,
+            opacities=opacity,
+            scales=scales,
+            rotations=rotations,
+            cov3D_precomp=None,
+        )
+
+        render_alpha = other_maps[1:2]
+
+        render_normal = other_maps[2:5]
+        render_normal = render_normal.permute(1, 2, 0) @ (camera.world_view_transform[:3, :3].T)
+        render_normal = render_normal.permute(2, 0, 1)
+
+        # get median depth map
+        render_depth_median = other_maps[5:6]
+        render_depth_median = torch.nan_to_num(render_depth_median, 0, 0)
+
+        # get expected depth map
+        render_depth_expected = other_maps[0:1]
+        render_depth_expected = (render_depth_expected / torch.clamp_min(render_alpha, 1e-6))
+        render_depth_expected = torch.nan_to_num(render_depth_expected, 0, 0)
+
+        # get depth distortion map
+        render_dist = other_maps[6:7]
+
+        if depth_source == "median":
+            render_depth = render_depth_median
+        elif depth_source == "expected":
+            render_depth = render_depth_expected
+        else:
+            raise ValueError(f"Unknown depth source {depth_source}")
+
+        surf_normal = depth_to_normal(camera, render_depth)
+        surf_normal = surf_normal.permute(2, 0, 1)
+        surf_normal = surf_normal * (render_alpha).detach()
+
+        return {
+            "viewspace_points": screenspace_points,
+            "render": rendered_image,
+            "depth": render_depth,
+            "depth_median": render_depth_median,
+            "depth_expected": render_depth_expected,
+            "alpha": render_alpha,
+            "normal": render_normal,
+            "normal_from_depth": surf_normal,
+            "distortion": render_dist,
+            "radii": radii,
+            "visibility_filter": radii > 0,
+        }

@@ -108,6 +108,8 @@ class Phase2Trainer(QuickSplatTrainer):
     def get_all_model_state_dict(self):
         all_state_dict = {}
         all_state_dict["model"] = self.model.state_dict()
+        # Save the initializer (though it is not trained here) for completeness
+        all_state_dict["initializer"] = self.initializer.state_dict()
 
         if self.config.MODEL.DENSIFIER.enable:
             if self.world_size > 1:
