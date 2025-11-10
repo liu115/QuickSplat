@@ -210,7 +210,7 @@ class Phase2Trainer(QuickSplatTrainer):
         xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
             scene_id,
             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-            crop_points=crop_points,
+            # crop_points=crop_points,
         )
         xyz = torch.from_numpy(xyz).float().to(self.device)
         rgb = torch.from_numpy(rgb).float().to(self.device)

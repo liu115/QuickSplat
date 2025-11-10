@@ -155,11 +155,11 @@ class Phase1Trainer(QuickSplatTrainer):
     @torch.no_grad()
     def init_scaffold_test(self, scene_id: str, test_mode: bool = False) -> ScaffoldGSFull:
         assert test_mode, "Test mode must be True in init_scaffold_test"
-        crop_points = True
+
         xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
             scene_id,
             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-            crop_points=crop_points,
+            # crop_points=crop_points,
         )
         xyz = torch.from_numpy(xyz).float().to(self.device)
         rgb = torch.from_numpy(rgb).float().to(self.device)

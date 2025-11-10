@@ -17,11 +17,7 @@ import pytorch3d.transforms as transforms3d
 from PIL import Image
 
 from trainers.base_trainer import BaseTrainer
-# TODO: Refactor the dataset
-from dataset.scannetpp import ScannetppDataset
-from dataset.scannetpp import MultiScannetppDataset
-from dataset.scannetpp_points import MultiScannetppPointDataset
-from dataset.scannetpp_points_aabb import MultiScannetppPointAABBDataset
+from dataset.scannetpp import ScannetppDataset, MultiScannetppDataset, MultiScannetppPointDataset
 from dataset.utils import RepeatSampler
 
 from models.scaffold_gs import (
@@ -45,10 +41,7 @@ class QuickSplatTrainer(BaseTrainer):
         # Starting from 1 inner step
         self.num_inner_steps = 1
 
-        if self.config.MODEL.input_type == "mesh":
-            self.ply_path = self.config.DATASET.gt_ply_path
-        else:
-            self.ply_path = self.config.DATASET.ply_path
+        self.ply_path = self.config.DATASET.ply_path
 
         use_depth_training = self.config.MODEL.OPT.depth_mult > 0 or self.config.MODEL.OPT.log_depth_mult > 0
         self.train_dataset = MultiScannetppDataset(
@@ -62,13 +55,13 @@ class QuickSplatTrainer(BaseTrainer):
             load_depth=use_depth_training,
         )
 
-        self.train_point_dataset = MultiScannetppPointAABBDataset(
+        self.train_point_dataset = MultiScannetppPointDataset(
             self.config.DATASET.source_path,
             self.ply_path,
             self.config.DATASET.gt_ply_path,
             self.config.DATASET.train_split_path,
-            self.config.DATASET.transform_path,
-            crop_points=False if self.config.MODEL.input_type == "mesh" else True,
+            # self.config.DATASET.transform_path,
+            # crop_points=False if self.config.MODEL.input_type == "mesh" else True,
             # crop_points=False,
             noise_aug=self.config.DATASET.use_point_aug,
             global_aug=self.config.DATASET.use_point_rotate_aug,
@@ -119,26 +112,26 @@ class QuickSplatTrainer(BaseTrainer):
             pin_memory=True,
             drop_last=True,
             sampler=sampler,
-            collate_fn=MultiScannetppPointDataset.collate_fn,
+            collate_fn=self.train_point_dataset.collate_fn,
         )
 
         self.train_iter = iter(self.train_loader)
         self.train_point_iter = iter(self.train_point_loader)
 
-        self.val_dataset = MultiScannetppPointAABBDataset(
+        self.val_dataset = MultiScannetppPointDataset(
             self.config.DATASET.source_path,
             self.ply_path,
             self.config.DATASET.gt_ply_path,
             self.config.DATASET.val_split_path,
-            self.config.DATASET.transform_path,
-            crop_points=False if self.config.MODEL.input_type == "mesh" else True,
+            # self.config.DATASET.transform_path,
+            # crop_points=False if self.config.MODEL.input_type == "mesh" else True,
             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
         )
 
     def get_inner_dataset(self, scene_id, fixed=False):
         inner_train_dataset = ScannetppDataset(
             self.config.DATASET.source_path,
-            self.ply_path,
+            self.config.DATASET.ply_path,
             scene_id=scene_id,
             split="train",
             # downsample=self.config.MODEL.OPT.inner_downsample,
@@ -930,7 +923,7 @@ class QuickSplatTrainer(BaseTrainer):
         """Compute the validation metrics"""
         dataset = ScannetppDataset(
             self.config.DATASET.source_path,
-            self.ply_path,
+            self.config.DATASET.ply_path,
             scene_id=scene_id,
             split="val",
             downsample=self.config.DATASET.image_downsample,
@@ -1072,7 +1065,6 @@ class QuickSplatTrainer(BaseTrainer):
         xyz, rgb, xyz_voxel, xyz_offset, bbox, bbox_voxel, world_to_voxel = self.val_dataset.load_voxelized_colmap_points(
             scene_id,
             voxel_size=self.config.MODEL.SCAFFOLD.voxel_size,
-            crop_points=True,
         )
         xyz_gt, rgb_gt, xyz_voxel_gt, *_, normal_gt = self.val_dataset.load_voxelized_mesh_points(
             scene_id,
@@ -1151,7 +1143,7 @@ class QuickSplatTrainer(BaseTrainer):
                 pin_memory=True,
                 drop_last=True,
                 sampler=sampler,
-                collate_fn=MultiScannetppPointDataset.collate_fn,
+                collate_fn=self.train_point_dataset.collate_fn,
             )
             self.train_point_iter = iter(self.train_point_loader)
 
