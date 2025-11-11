@@ -31,6 +31,10 @@ python -m preprocess.prepare_spp_data \
 
 The training and validation splits in Quicksplat are the subset of ScanNet++ train split. The test split is the subset of the ScanNet++ val split. We filter out the scenes that have incomplete meshes (e.g., missing walls) to have better GT for training and evaluation. We also filter out the scenes that are too large to train.
 
+The transforms.json files of the testing scenes which contains the subsampled training views.
+
+Download the data from [dropbox](https://www.dropbox.com/scl/fi/gccii4k8aer4y07w0pe1b/quicksplat_spp_data.zip?rlkey=qlrlqz1h69ut4rn5ldups2456&dl=0), and unzip it to `<OUTPUT_DATA_ROOT>/`.
+
 
 # The overall directory structure after preprocessing
 ```
