@@ -34,7 +34,7 @@ _C.DATASET.val_split_path = "VAL_SPLIT_PATH"
 _C.DATASET.test_split_path = "TEST_SPLIT_PATH"
 _C.DATASET.train_chunk_path = "TRAIN_CHUNK_PATH"
 _C.DATASET.val_chunk_path = "VAL_CHUNK_PATH"
-_C.DATASET.transform_path = "TRANSFORM_PATH"
+_C.DATASET.transform_path = "TRANSFORM_PATH"    # Deprecated
 _C.DATASET.image_downsample = 2
 _C.DATASET.cache_gpu = False        # Speed up the training (for GS methods)
 

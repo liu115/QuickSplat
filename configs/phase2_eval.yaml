@@ -1,0 +1,92 @@
+name: inference
+subname: phase2
+
+DATASET:
+  source_path: TRAIN_DATA_PATH
+  ply_path: PATH_TO_COLMAP_PLY_DIR
+  gt_ply_path: PATH_TO_GT_MESH_DIR
+
+  max_num_points: 100_000
+  eval_max_num_points: 200_000
+  num_train_frames: 100
+  cache_gpu: True
+
+
+TRAIN:
+  val_interval: 250
+  num_iterations: 500   # Run 500 iterations of 2DGS optimization
+  batch_size: 4
+  num_workers: 4
+  # Initializer checkpoints
+  ckpt_path: ./checkpoints/initializer.ckpt
+
+MODEL:
+  gaussian_type: "2d"
+  decoder_type: "scaffold"
+  model_type: "neural"
+  input_type: "colmap+completion"
+  use_identity_loss: False
+
+  INIT:
+    model_type: sgnn18
+    init_type: "opacity+rgb+normal+scale"
+    num_dense_blocks: 4
+    use_balance_weight: True
+    dilate_gt: 0
+
+  DENSIFIER:
+    enable: True
+    model_type: dense18
+    # Evaluation related
+    num_densify_steps_eval: 3
+    sample_num_per_step_eval: 20000
+
+    sample_num_per_step: 50000
+    sample_temperature: 1.0
+    sample_temperature_decay: 0.998
+    loss_ignore_exist: False
+    occupancy_as_opacity: True
+    ignore_second_last: False
+    dilate_ignore: 0
+
+  OPT:
+    backbone: 16unetC
+    num_steps: 5
+    output_scale: 1.0
+    scale_gamma: 0.7
+    min_scale: 0.5
+    output_norm: True
+    grad_residual: False
+    inner_batch_size: 8
+    inner_downsample: 2
+    max_grad: 1.0
+
+    # Training related (loss weights)
+    add_step_every: 101
+    vgg_mult: 1.0
+    dist_mult: 10.0
+    normal_mult: 0.0
+    depth_mult: 1.0
+    occ_mult: 1.0
+    normal_loss_mult: 0.0
+    lpips_mult: 0.0
+    ssim_mult: 0.0
+
+  GSPLAT:
+    density_control: False
+    max_sh_degree: 0
+    init_opacity: 0.5
+    lambda_normal: 0.0
+
+  SCAFFOLD:
+    voxel_size: 0.04
+    hidden_dim: 64
+    num_layers: 2
+
+    zero_latent: True
+    max_scale: 10.0
+    scale_activation: softplus
+    unit_scale_multiplier: 0.8
+    unit_scale: True
+    offset_scaling: 4.0
+    num_gs: 2

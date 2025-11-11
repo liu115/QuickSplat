@@ -256,7 +256,8 @@ class InferenceTrainer(Phase2Trainer):
                 mesh_metrics = self.evaluate_mesh_and_save_scaffold(
                     scene_id,
                     scaffold,
-                    save_path=save_dir / f"{scene_id}_0.ply",
+                    # Uncomment to save intermediate meshes
+                    # save_path=save_dir / f"{scene_id}_0.ply",
                     depth_source="expected",
                 )
                 init_metrics.update(mesh_metrics)
@@ -299,7 +300,8 @@ class InferenceTrainer(Phase2Trainer):
                     mesh_metrics = self.evaluate_mesh_and_save_scaffold(
                         scene_id,
                         scaffold,
-                        save_path=save_dir / f"{scene_id}_{inner_step_idx + 1}.ply",
+                        # Uncomment to save intermediate meshes
+                        # save_path=save_dir / f"{scene_id}_{inner_step_idx + 1}.ply",
                         depth_source="expected",
                     )
                     eval_metrics.update(mesh_metrics)
@@ -345,6 +347,12 @@ class InferenceTrainer(Phase2Trainer):
             # End of per-scene loop
 
         # Print the average metrics across scenes
+        output_summary = {
+            "per_scene": {
+                scene_id: {} for scene_id in all_scene_history.keys()
+            },
+            "average": {},
+        }
         metric_names = [
             "psnr",
             "lpips",
@@ -366,6 +374,11 @@ class InferenceTrainer(Phase2Trainer):
                 val_init = scene_history[0]["metrics"][metric_name]
                 val_opt = scene_history[self.num_inner_steps]["metrics"][metric_name]
                 val_ft = scene_history[-1]["metrics"][metric_name]
+                output_summary["per_scene"][scene_id][metric_name] = {
+                    "init": val_init,
+                    "opt": val_opt,
+                    "ft": val_ft,
+                }
                 avg_val_init += val_init
                 avg_val_opt += val_opt
                 avg_val_ft += val_ft
@@ -373,6 +386,14 @@ class InferenceTrainer(Phase2Trainer):
             avg_val_init /= len(all_scene_history)
             avg_val_opt /= len(all_scene_history)
             CONSOLE.print(f"Metric: {metric_name}, Init: {avg_val_init:.3f}, Opt: {avg_val_opt:.3f}, FT: {avg_val_ft:.3f}")
+
+            output_summary["average"][metric_name] = {
+                "init": avg_val_init,
+                "opt": avg_val_opt,
+                "ft": avg_val_ft,
+            }
+        with open(self.output_dir / "test_summary.json", "w") as f:
+            json.dump(output_summary, f, indent=4)
 
     def evaluate_mesh_and_save_scaffold(
         self,

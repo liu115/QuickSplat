@@ -33,7 +33,7 @@ def render_depth_maps(
         data_root=data_root,
     )
 
-    transforms_path = Path(output_root) / scene_id / "transforms.json"
+    transforms_path = Path(output_root) / "data" / scene_id / "transforms.json"
     with open(transforms_path, 'r') as f:
         transform = json.load(f)
 
@@ -72,7 +72,7 @@ def render_depth_maps(
 
     near = 0.05
     far = 20.0
-    depth_dir = Path(output_root) / scene_id / "depth"
+    depth_dir = Path(output_root) / "data" / scene_id / "depth"
     depth_dir.mkdir(parents=True, exist_ok=True)
     for image_id, image in tqdm(images.items(), "Rendering images"):
         if image.name not in image_names:
@@ -94,14 +94,14 @@ def build_symlinks(
     )
 
     dslr_undistorted_dir = scene.dslr_resized_undistorted_dir
-    output_image_dir = Path(output_root) / scene_id / "images"
+    output_image_dir = Path(output_root) / "data" / scene_id / "images"
     # Create symlink for the undistorted images
     if not output_image_dir.exists():
         os.makedirs(output_image_dir.parent, exist_ok=True)
         os.symlink(dslr_undistorted_dir, output_image_dir)
 
     # Copy transforms.json
-    output_transform_path = Path(output_root) / scene_id / "transforms.json"
+    output_transform_path = Path(output_root) / "data" / scene_id / "transforms.json"
     if not output_transform_path.exists():
         os.symlink(scene.dslr_nerfstudio_transform_undistorted_path, output_transform_path)
     else:
